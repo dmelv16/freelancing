@@ -485,32 +485,51 @@ def visualize_predictions_timeline(results_df: pd.DataFrame, parquet_file, outpu
             prev_status = None
             segment_start = 0
             
-            for i, (x, v, status) in enumerate(zip(x_values, voltages, 
-                                                    dc_predictions['predicted_status_clean'].values)):
+            # Convert to lists to avoid zip issues
+            status_values = dc_predictions['predicted_status_clean'].values
+            
+            for i in range(len(status_values)):
+                status = status_values[i]
                 if status != prev_status:
                     if prev_status is not None and i > segment_start:
                         # Fill the previous segment
                         color = get_status_color(prev_status)
-                        ax.fill_between(x_values[segment_start:i], 
-                                      voltages[segment_start:i] - 2,
-                                      voltages[segment_start:i] + 2,
-                                      alpha=0.2, color=color)
+                        if use_timestamps:
+                            ax.fill_between(x_values.iloc[segment_start:i], 
+                                          voltages[segment_start:i] - 2,
+                                          voltages[segment_start:i] + 2,
+                                          alpha=0.2, color=color)
+                        else:
+                            ax.fill_between(x_values[segment_start:i], 
+                                          voltages[segment_start:i] - 2,
+                                          voltages[segment_start:i] + 2,
+                                          alpha=0.2, color=color)
                     segment_start = i
                     prev_status = status
             
             # Fill the last segment
             if prev_status is not None:
                 color = get_status_color(prev_status)
-                ax.fill_between(x_values[segment_start:], 
-                              voltages[segment_start:] - 2,
-                              voltages[segment_start:] + 2,
-                              alpha=0.2, color=color)
+                if use_timestamps:
+                    ax.fill_between(x_values.iloc[segment_start:], 
+                                  voltages[segment_start:] - 2,
+                                  voltages[segment_start:] + 2,
+                                  alpha=0.2, color=color)
+                else:
+                    ax.fill_between(x_values[segment_start:], 
+                                  voltages[segment_start:] - 2,
+                                  voltages[segment_start:] + 2,
+                                  alpha=0.2, color=color)
             
             # Add status change markers
-            prev_status = dc_predictions['predicted_status_clean'].iloc[0]
-            for i, (x, v, status) in enumerate(zip(x_values, voltages, 
-                                                   dc_predictions['predicted_status_clean'].values)):
-                if status != prev_status:
+            prev_status = dc_predictions['predicted_status_clean'].iloc[0] if len(dc_predictions) > 0 else None
+            for i in range(len(status_values)):
+                status = status_values[i]
+                if status != prev_status and prev_status is not None:
+                    if use_timestamps:
+                        x = x_values.iloc[i]
+                    else:
+                        x = x_values[i]
                     ax.axvline(x=x, color='red', linestyle='--', alpha=0.5, linewidth=1)
                     # Add text annotation for the new status
                     ax.text(x, ax.get_ylim()[1] * 0.95, status, 
@@ -707,31 +726,33 @@ def visualize_predictions_with_actual_voltage(predictor, parquet_path: str, resu
                     prev_status = None
                     status_segments = []
                     
+                    # Convert to numpy array to avoid iterator issues
+                    predictions_array = dc_preds[['window_end_index', 'predicted_status_clean']].values
+                    
                     # Group consecutive predictions with the same status
-                    for _, pred_row in dc_preds.iterrows():
-                        if 'window_end_index' in pred_row:
-                            end_idx = int(pred_row['window_end_index'])
-                            start_idx = max(0, end_idx - predictor.window_size + 1)
-                            current_status = pred_row['predicted_status_clean']
+                    for row in predictions_array:
+                        end_idx = int(row[0]) if not np.isnan(row[0]) else 0
+                        current_status = str(row[1])
+                        start_idx = max(0, end_idx - predictor.window_size + 1)
+                        
+                        if current_status != prev_status:
+                            # New status segment
+                            if prev_status is not None and status_segments:
+                                # Close the previous segment
+                                status_segments[-1]['end_idx'] = start_idx
                             
-                            if current_status != prev_status:
-                                # New status segment
-                                if prev_status is not None and status_segments:
-                                    # Close the previous segment
-                                    status_segments[-1]['end_idx'] = start_idx
-                                
-                                # Start new segment
-                                status_segments.append({
-                                    'status': current_status,
-                                    'start_idx': start_idx,
-                                    'end_idx': end_idx,
-                                    'color': get_status_color(current_status)
-                                })
-                                prev_status = current_status
-                            else:
-                                # Extend current segment
-                                if status_segments:
-                                    status_segments[-1]['end_idx'] = end_idx
+                            # Start new segment
+                            status_segments.append({
+                                'status': current_status,
+                                'start_idx': start_idx,
+                                'end_idx': end_idx,
+                                'color': get_status_color(current_status)
+                            })
+                            prev_status = current_status
+                        else:
+                            # Extend current segment
+                            if status_segments:
+                                status_segments[-1]['end_idx'] = end_idx
                     
                     # Draw status regions and labels
                     for i, segment in enumerate(status_segments):
