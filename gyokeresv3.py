@@ -481,60 +481,33 @@ def visualize_predictions_timeline(results_df: pd.DataFrame, parquet_file, outpu
             # Plot main voltage line
             ax.plot(x_values, voltages, 'b-', linewidth=1.5, alpha=0.7, label='Voltage')
             
-            # Color-code regions based on predicted status
-            prev_status = None
-            segment_start = 0
+            # Simply plot the voltage line without complex status regions
+            ax.plot(x_values, voltages, 'b-', linewidth=1.5, alpha=0.7, label='Voltage')
             
-            # Convert to lists to avoid zip issues
+            # Add predicted status as text annotations at regular intervals
             status_values = dc_predictions['predicted_status_clean'].values
+            num_labels = min(10, len(status_values))  # Limit number of labels to avoid crowding
             
-            for i in range(len(status_values)):
-                status = status_values[i]
-                if status != prev_status:
-                    if prev_status is not None and i > segment_start:
-                        # Fill the previous segment
-                        color = get_status_color(prev_status)
-                        if use_timestamps:
-                            ax.fill_between(x_values.iloc[segment_start:i], 
-                                          voltages[segment_start:i] - 2,
-                                          voltages[segment_start:i] + 2,
-                                          alpha=0.2, color=color)
-                        else:
-                            ax.fill_between(x_values[segment_start:i], 
-                                          voltages[segment_start:i] - 2,
-                                          voltages[segment_start:i] + 2,
-                                          alpha=0.2, color=color)
-                    segment_start = i
-                    prev_status = status
-            
-            # Fill the last segment
-            if prev_status is not None:
-                color = get_status_color(prev_status)
-                if use_timestamps:
-                    ax.fill_between(x_values.iloc[segment_start:], 
-                                  voltages[segment_start:] - 2,
-                                  voltages[segment_start:] + 2,
-                                  alpha=0.2, color=color)
-                else:
-                    ax.fill_between(x_values[segment_start:], 
-                                  voltages[segment_start:] - 2,
-                                  voltages[segment_start:] + 2,
-                                  alpha=0.2, color=color)
-            
-            # Add status change markers
-            prev_status = dc_predictions['predicted_status_clean'].iloc[0] if len(dc_predictions) > 0 else None
-            for i in range(len(status_values)):
-                status = status_values[i]
-                if status != prev_status and prev_status is not None:
+            if num_labels > 0:
+                indices_to_label = np.linspace(0, len(status_values)-1, num_labels, dtype=int)
+                
+                for idx in indices_to_label:
+                    status = status_values[idx]
+                    color = get_status_color(status)
+                    
+                    # Get x and y position for label
                     if use_timestamps:
-                        x = x_values.iloc[i]
+                        x_pos = x_values.iloc[idx]
                     else:
-                        x = x_values[i]
-                    ax.axvline(x=x, color='red', linestyle='--', alpha=0.5, linewidth=1)
-                    # Add text annotation for the new status
-                    ax.text(x, ax.get_ylim()[1] * 0.95, status, 
-                           rotation=45, fontsize=8, ha='right', va='top')
-                    prev_status = status
+                        x_pos = x_values[idx]
+                    y_pos = voltages[idx]
+                    
+                    # Add a marker and label
+                    ax.plot(x_pos, y_pos, 'o', color=color, markersize=8, alpha=0.7)
+                    ax.annotate(status, xy=(x_pos, y_pos), 
+                              xytext=(5, 5), textcoords='offset points',
+                              fontsize=8, color=color, weight='bold',
+                              bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
             
             # Formatting
             ax.set_ylabel(f'DC{dc_num} Voltage (V)', fontsize=11)
@@ -714,7 +687,7 @@ def visualize_predictions_with_actual_voltage(predictor, parquet_path: str, resu
                 # Plot the actual voltage line
                 ax.plot(x_values, voltages, 'b-', linewidth=1.0, alpha=0.8, label='Actual Voltage', zorder=2)
                 
-                # Overlay prediction regions if we have them
+                # Overlay predictions as colored markers if we have them
                 if len(dc_preds) > 0:
                     # Sort predictions
                     if 'timestamp' in dc_preds.columns and use_timestamps:
@@ -722,68 +695,64 @@ def visualize_predictions_with_actual_voltage(predictor, parquet_path: str, resu
                     else:
                         dc_preds = dc_preds.sort_values('window_end_index')
                     
-                    # Track status changes for labeling
-                    prev_status = None
-                    status_segments = []
-                    
-                    # Convert to numpy array to avoid iterator issues
-                    predictions_array = dc_preds[['window_end_index', 'predicted_status_clean']].values
-                    
-                    # Group consecutive predictions with the same status
-                    for row in predictions_array:
-                        end_idx = int(row[0]) if not np.isnan(row[0]) else 0
-                        current_status = str(row[1])
-                        start_idx = max(0, end_idx - predictor.window_size + 1)
-                        
-                        if current_status != prev_status:
-                            # New status segment
-                            if prev_status is not None and status_segments:
-                                # Close the previous segment
-                                status_segments[-1]['end_idx'] = start_idx
+                    # Plot predictions as colored markers along the voltage line
+                    for idx, row in dc_preds.iterrows():
+                        if 'window_end_index' not in row:
+                            continue
                             
-                            # Start new segment
-                            status_segments.append({
-                                'status': current_status,
-                                'start_idx': start_idx,
-                                'end_idx': end_idx,
-                                'color': get_status_color(current_status)
-                            })
-                            prev_status = current_status
+                        end_idx = int(row['window_end_index'])
+                        if end_idx >= len(voltages):
+                            continue
+                            
+                        status = row['predicted_status_clean']
+                        color = get_status_color(status)
+                        
+                        # Get position for this prediction
+                        if use_timestamps:
+                            if end_idx < len(x_values):
+                                x_pos = x_values.iloc[end_idx]
+                            else:
+                                continue
                         else:
-                            # Extend current segment
-                            if status_segments:
-                                status_segments[-1]['end_idx'] = end_idx
-                    
-                    # Draw status regions and labels
-                    for i, segment in enumerate(status_segments):
-                        start_idx = segment['start_idx']
-                        end_idx = segment['end_idx']
-                        status = segment['status']
-                        color = segment['color']
+                            x_pos = end_idx
                         
-                        # Draw the colored region
-                        if use_timestamps and start_idx < len(x_values) and end_idx < len(x_values):
-                            x_start = x_values.iloc[start_idx]
-                            x_end = x_values.iloc[end_idx]
-                            ax.axvspan(x_start, x_end, alpha=0.2, color=color, zorder=1)
+                        y_pos = voltages[end_idx] if end_idx < len(voltages) else voltages[-1]
+                        
+                        # Plot a marker at this prediction point
+                        ax.scatter(x_pos, y_pos, c=color, s=50, alpha=0.6, zorder=3)
+                    
+                    # Add text labels for status changes
+                    prev_status = None
+                    for idx, row in dc_preds.iterrows():
+                        if 'window_end_index' not in row:
+                            continue
+                        
+                        end_idx = int(row['window_end_index'])
+                        if end_idx >= len(voltages):
+                            continue
                             
-                            # Add status label in the middle of the region
-                            x_mid = x_values.iloc[(start_idx + end_idx) // 2]
-                            y_position = ax.get_ylim()[1] * 0.9
-                            ax.text(x_mid, y_position, status, 
-                                   rotation=45, fontsize=9, ha='center', va='bottom',
-                                   bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.5),
-                                   zorder=3)
-                        elif not use_timestamps:
-                            ax.axvspan(start_idx, end_idx, alpha=0.2, color=color, zorder=1)
+                        status = row['predicted_status_clean']
+                        
+                        # Only add label when status changes
+                        if status != prev_status:
+                            if use_timestamps and end_idx < len(x_values):
+                                x_pos = x_values.iloc[end_idx]
+                            elif not use_timestamps:
+                                x_pos = end_idx
+                            else:
+                                continue
+                                
+                            y_pos = voltages[end_idx]
                             
-                            # Add status label
-                            x_mid = (start_idx + end_idx) / 2
-                            y_position = ax.get_ylim()[1] * 0.9
-                            ax.text(x_mid, y_position, status,
-                                   rotation=45, fontsize=9, ha='center', va='bottom',
-                                   bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.5),
-                                   zorder=3)
+                            # Add text annotation
+                            ax.annotate(status, xy=(x_pos, y_pos),
+                                      xytext=(5, 10), textcoords='offset points',
+                                      fontsize=9, color=get_status_color(status),
+                                      weight='bold',
+                                      bbox=dict(boxstyle='round,pad=0.3', 
+                                              facecolor='white', alpha=0.8),
+                                      zorder=4)
+                            prev_status = status
                 
                 # Formatting
                 ax.set_ylabel(f'DC{dc_num} Voltage (V)', fontsize=11)
@@ -957,7 +926,6 @@ def predict_old_format_parquet(
                 print(f"  {status}: {count:,} ({count/len(dc_data)*100:.1f}%)")
     
     return results_df
-
 
 # Example usage
 if __name__ == "__main__":
