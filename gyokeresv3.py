@@ -180,9 +180,19 @@ class OldFormatPredictor:
         if len(data_df) < self.window_size:
             return []
         
-        # Extract features and make predictions
-        voltage = data_df[voltage_col].values
-        current = data_df[current_col].values if current_col in data_df.columns else np.zeros_like(voltage)
+        # Convert to numpy arrays to avoid ArrowExtensionArray issues
+        voltage = data_df[voltage_col].to_numpy() if hasattr(data_df[voltage_col], 'to_numpy') else data_df[voltage_col].values
+        
+        # Handle current - it might not exist or might be zeros
+        if current_col in data_df.columns:
+            current = data_df[current_col].to_numpy() if hasattr(data_df[current_col], 'to_numpy') else data_df[current_col].values
+        else:
+            print(f"Warning: No current data for DC{dc_num}, using zeros")
+            current = np.zeros_like(voltage)
+        
+        # Ensure we have float arrays
+        voltage = np.array(voltage, dtype=np.float32)
+        current = np.array(current, dtype=np.float32)
         
         # Extract windows
         features, window_indices = self._extract_windows(voltage, current, dc_num)
@@ -464,6 +474,8 @@ def visualize_predictions_timeline(results_df: pd.DataFrame, num_groups: int = 5
 def predict_old_format_parquet(
     parquet_path: str,
     model_pkl_path: str,
+    window_size: int = 100,
+    stride: int = 20,
     compare_with_actual: bool = True,
     max_samples: Optional[int] = None,
     visualize: bool = True,
@@ -474,6 +486,8 @@ def predict_old_format_parquet(
     Args:
         parquet_path: Path to old format parquet file
         model_pkl_path: Path to saved unified model
+        window_size: Size of sliding window for feature extraction (must match model training)
+        stride: Stride for sliding window
         compare_with_actual: If True, compare predictions with actual labels
         max_samples: Maximum samples to process (None for all)
         visualize: If True, create visualizations
@@ -485,11 +499,12 @@ def predict_old_format_parquet(
     print("="*80)
     print("OLD FORMAT PARQUET STATUS PREDICTION")
     print("="*80)
+    print(f"Window size: {window_size}, Stride: {stride}")
     
     start_time = time.time()
     
-    # Initialize predictor
-    predictor = OldFormatPredictor(model_pkl_path)
+    # Initialize predictor with specified window size and stride
+    predictor = OldFormatPredictor(model_pkl_path, window_size=window_size, stride=stride)
     
     # Load data and make predictions
     results_df = predictor.load_and_predict(
@@ -535,6 +550,8 @@ if __name__ == "__main__":
     results = predict_old_format_parquet(
         parquet_path='old_format_data.parquet',  # Your old format parquet
         model_pkl_path='unified_dc_model.pkl',   # Your trained model
+        window_size=100,                         # Must match what model was trained with
+        stride=20,                                # Stride for sliding window
         compare_with_actual=True,                # Compare with actual labels
         max_samples=None,                        # Process all data
         visualize=True,                          # Create visualizations
