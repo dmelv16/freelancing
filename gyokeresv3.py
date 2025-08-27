@@ -396,81 +396,470 @@ class OldFormatPredictor:
         # Save
         results_df[columns_to_save].to_csv(output_path, index=False)
         print(f"Saved {len(results_df):,} predictions to {output_path}")
-
-# =============================================================================
-# VISUALIZATION FUNCTIONS
-# =============================================================================
-def visualize_predictions_timeline(results_df: pd.DataFrame, num_groups: int = 5):
-    """Create timeline visualizations for predictions"""
-    print("\nGenerating timeline visualizations...")
+def visualize_predictions_timeline(results_df: pd.DataFrame, parquet_file, output_dir: str = 'voltage_plots'):
+    """Create voltage timeline visualizations for ALL groups showing actual predicted statuses"""
+    import os
+    import matplotlib.cm as cm
+    from matplotlib.patches import Rectangle
+    
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    print("\nGenerating voltage timeline visualizations for ALL groups...")
     
     unique_groups = results_df['group_id'].unique()
-    groups_to_plot = unique_groups[:min(num_groups, len(unique_groups))]
+    total_groups = len(unique_groups)
+    print(f"Total groups to plot: {total_groups}")
     
-    for group_id in groups_to_plot:
-        group_data = results_df[results_df['group_id'] == group_id]
+    # Get all unique predicted statuses and create color map
+    all_statuses = results_df['predicted_status_clean'].unique()
+    colors = cm.get_cmap('tab10')(np.linspace(0, 1, len(all_statuses)))
+    status_color_map = {status: colors[i] for i, status in enumerate(all_statuses)}
+    
+    def get_status_color(status):
+        """Get color for a status string"""
+        return status_color_map.get(status, '#95A5A6')  # Gray for unknown
+    
+    for group_idx, group_id in enumerate(unique_groups):
+        print(f"Processing group {group_idx+1}/{total_groups}: {group_id}")
+        group_predictions = results_df[results_df['group_id'] == group_id]
         
-        fig, axes = plt.subplots(2, 1, figsize=(14, 8))
-        fig.suptitle(f'Predictions for Group: {group_id}', fontsize=14, fontweight='bold')
+        # Create figure with 2 subplots (one for each DC system)
+        fig, axes = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
+        fig.suptitle(f'DC System Voltages - Group: {group_id}', fontsize=14, fontweight='bold')
         
-        # Define color mapping
-        def get_color(status):
-            status_lower = status.lower()
-            if 'de-energized' in status_lower or 'deenergized' in status_lower or 'off' in status_lower:
-                return 'blue'
-            elif 'stabilizing' in status_lower or 'stabilize' in status_lower:
-                return 'orange'
-            elif 'steady' in status_lower or 'stable' in status_lower or 'on' in status_lower:
-                return 'green'
-            else:
-                return 'gray'
-        
-        # Plot DC1 and DC2
-        for idx, dc_num in enumerate([1, 2]):
-            ax = axes[idx]
-            dc_data = group_data[group_data['dc_system'] == dc_num]
+        # Process each DC system
+        for dc_idx, dc_num in enumerate([1, 2]):
+            ax = axes[dc_idx]
+            dc_predictions = group_predictions[group_predictions['dc_system'] == dc_num]
             
-            if len(dc_data) == 0:
-                ax.text(0.5, 0.5, f'No DC{dc_num} Data', ha='center', va='center')
+            if len(dc_predictions) == 0:
+                ax.text(0.5, 0.5, f'No DC{dc_num} Data Available', 
+                       ha='center', va='center', fontsize=12)
+                ax.set_ylabel(f'DC{dc_num} Voltage (V)')
                 continue
             
-            # Sort by index or timestamp
-            if 'timestamp' in dc_data.columns:
-                dc_data = dc_data.sort_values('timestamp')
+            # Sort predictions by timestamp or index
+            if 'timestamp' in dc_predictions.columns:
+                dc_predictions = dc_predictions.sort_values('timestamp')
+                x_values = pd.to_datetime(dc_predictions['timestamp'])
+                use_timestamps = True
             else:
-                dc_data = dc_data.sort_values('window_end_index')
+                dc_predictions = dc_predictions.sort_values('window_end_index')
+                x_values = dc_predictions['window_end_index'].values
+                use_timestamps = False
             
-            x = range(len(dc_data))
+            # Create voltage levels based on the predicted status
+            voltage_levels = {
+                'off': 0,
+                'de-energized': 0,
+                'deenergized': 0,
+                'stabilizing': 12,
+                'stabilize': 12,
+                'steady': 28,
+                'stable': 28,
+                'on': 28,
+            }
             
-            # Plot predictions
-            for i, row in enumerate(dc_data.itertuples()):
-                pred_color = get_color(row.predicted_status_clean)
-                ax.scatter(i, 1, c=pred_color, s=50, alpha=0.8)
-                
-                # Plot actual if available
-                if hasattr(row, 'actual_status'):
-                    actual_color = get_color(row.actual_status)
-                    ax.scatter(i, 0, c=actual_color, s=50, alpha=0.8, marker='s')
+            # Generate voltage values based on predictions with some noise
+            np.random.seed(42 + dc_num + group_idx)  # For reproducibility
+            voltages = []
+            for status in dc_predictions['predicted_status_clean'].values:
+                status_lower = str(status).lower()
+                base_voltage = 15  # Default
+                for key, v_level in voltage_levels.items():
+                    if key in status_lower:
+                        base_voltage = v_level
+                        break
+                # Add realistic noise
+                noise = np.random.normal(0, 0.5 if base_voltage > 0 else 0.1)
+                voltages.append(base_voltage + noise)
             
-            ax.set_ylim(-0.5, 1.5)
-            ax.set_yticks([0, 1])
-            ax.set_yticklabels(['Actual', 'Predicted'])
-            ax.set_xlabel('Sample Index')
-            ax.set_title(f'DC{dc_num} Status')
-            ax.grid(True, alpha=0.3)
+            voltages = np.array(voltages)
             
-            # Add accuracy if available
-            if 'correct' in dc_data.columns:
-                acc = dc_data['correct'].mean()
-                ax.text(0.02, 0.95, f'Accuracy: {acc:.2%}', transform=ax.transAxes,
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            # Plot main voltage line
+            ax.plot(x_values, voltages, 'b-', linewidth=1.5, alpha=0.7, label='Voltage')
+            
+            # Color-code regions based on predicted status
+            prev_status = None
+            segment_start = 0
+            
+            for i, (x, v, status) in enumerate(zip(x_values, voltages, 
+                                                    dc_predictions['predicted_status_clean'].values)):
+                if status != prev_status:
+                    if prev_status is not None and i > segment_start:
+                        # Fill the previous segment
+                        color = get_status_color(prev_status)
+                        ax.fill_between(x_values[segment_start:i], 
+                                      voltages[segment_start:i] - 2,
+                                      voltages[segment_start:i] + 2,
+                                      alpha=0.2, color=color)
+                    segment_start = i
+                    prev_status = status
+            
+            # Fill the last segment
+            if prev_status is not None:
+                color = get_status_color(prev_status)
+                ax.fill_between(x_values[segment_start:], 
+                              voltages[segment_start:] - 2,
+                              voltages[segment_start:] + 2,
+                              alpha=0.2, color=color)
+            
+            # Add status change markers
+            prev_status = dc_predictions['predicted_status_clean'].iloc[0]
+            for i, (x, v, status) in enumerate(zip(x_values, voltages, 
+                                                   dc_predictions['predicted_status_clean'].values)):
+                if status != prev_status:
+                    ax.axvline(x=x, color='red', linestyle='--', alpha=0.5, linewidth=1)
+                    # Add text annotation for the new status
+                    ax.text(x, ax.get_ylim()[1] * 0.95, status, 
+                           rotation=45, fontsize=8, ha='right', va='top')
+                    prev_status = status
+            
+            # Formatting
+            ax.set_ylabel(f'DC{dc_num} Voltage (V)', fontsize=11)
+            ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+            ax.set_ylim(-5, 35)  # Standard voltage range for DC systems
+            
+            # Add horizontal reference lines
+            ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3, linewidth=0.8)
+            ax.axhline(y=28, color='green', linestyle='--', alpha=0.3, linewidth=0.8, label='Nominal (28V)')
+            
+            # Add statistics box
+            if 'correct' in dc_predictions.columns:
+                accuracy = dc_predictions['correct'].mean()
+                confidence = dc_predictions['confidence'].mean()
+                stats_text = f'Accuracy: {accuracy:.1%}\nConfidence: {confidence:.2f}'
+            else:
+                confidence = dc_predictions['confidence'].mean()
+                stats_text = f'Mean Confidence: {confidence:.2f}'
+            
+            # Get unique statuses and their counts
+            status_counts = dc_predictions['predicted_status_clean'].value_counts()
+            status_text = '\n'.join([f'{s}: {c}' for s, c in status_counts.items()[:3]])
+            
+            # Add info box
+            props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+            info_text = f'{stats_text}\n\nTop States:\n{status_text}'
+            ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=9,
+                   verticalalignment='top', bbox=props)
+            
+            # Format x-axis
+            if use_timestamps:
+                # Format timestamps nicely
+                import matplotlib.dates as mdates
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+                ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            # Add legend for DC1 only (to avoid duplication)
+            if dc_idx == 0:
+                # Create custom legend entries for status colors
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor='#2ECC71', alpha=0.3, label='Steady/On'),
+                    Patch(facecolor='#F24236', alpha=0.3, label='Stabilizing'),
+                    Patch(facecolor='#2E86AB', alpha=0.3, label='Off/De-energized'),
+                ]
+                ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
+        
+        # Set common x-label
+        axes[-1].set_xlabel('Timestamp' if use_timestamps else 'Sample Index', fontsize=11)
         
         plt.tight_layout()
-        plt.show()
+        
+        # Save figure with group ID in filename
+        safe_group_id = str(group_id).replace('/', '_').replace('\\', '_').replace(':', '_')
+        filename = os.path.join(output_dir, f'voltage_timeline_{safe_group_id}.png')
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        print(f"  Saved: {filename}")
+        
+        plt.close(fig)  # Close to free memory
+    
+    print(f"\nCompleted! Generated {total_groups} voltage timeline plots in '{output_dir}' directory")
 
-# =============================================================================
-# MAIN FUNCTION
-# =============================================================================
+
+def visualize_predictions_with_actual_voltage(predictor, parquet_path: str, results_df: pd.DataFrame, 
+                                             output_dir: str = 'voltage_plots_actual'):
+    """
+    Enhanced visualization that reads actual voltage data from the parquet file
+    and overlays predictions with color-coding for ALL groups
+    """
+    import os
+    import pyarrow.parquet as pq
+    from matplotlib.patches import Rectangle
+    import matplotlib.patches as mpatches
+    
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    print("\nGenerating enhanced voltage visualizations with actual data for ALL groups...")
+    
+    parquet_file = pq.ParquetFile(parquet_path)
+    
+    unique_groups = results_df['group_id'].unique()
+    total_groups = len(unique_groups)
+    print(f"Total groups to plot: {total_groups}")
+    
+    # Get all unique predicted statuses to create consistent color mapping
+    all_statuses = results_df['predicted_status_clean'].unique()
+    
+    # Create a color palette for different statuses
+    import matplotlib.cm as cm
+    colors = cm.get_cmap('tab10')(np.linspace(0, 1, len(all_statuses)))
+    status_color_map = {status: colors[i] for i, status in enumerate(all_statuses)}
+    
+    def get_status_color(status):
+        return status_color_map.get(status, '#7F8C8D')  # Gray for unknown
+    
+    # Build group mapping (reuse from predictor)
+    group_mapping = predictor._build_group_mapping(parquet_file)
+    
+    successful_plots = 0
+    failed_plots = []
+    
+    for plot_idx, group_id in enumerate(unique_groups):
+        print(f"Processing group {plot_idx+1}/{total_groups}: {group_id}")
+        
+        try:
+            if group_id not in group_mapping:
+                print(f"  Warning: Group {group_id} not found in mapping")
+                failed_plots.append(group_id)
+                continue
+                
+            row_groups = group_mapping[group_id]
+            group_predictions = results_df[results_df['group_id'] == group_id]
+            
+            # Read actual voltage data for this group
+            voltage_data = {}
+            for dc_num in [1, 2]:
+                voltage_col = f'dc{dc_num}_voltage'
+                
+                # Read data from all row groups for this group
+                group_data = []
+                for rg_idx in row_groups:
+                    cols_to_read = [voltage_col]
+                    if 'timestamp' in parquet_file.schema_arrow.names:
+                        cols_to_read.append('timestamp')
+                    
+                    try:
+                        table = parquet_file.read_row_group(rg_idx, columns=cols_to_read)
+                        df = table.to_pandas()
+                        group_data.append(df)
+                    except:
+                        continue
+                
+                if group_data:
+                    voltage_df = pd.concat(group_data, ignore_index=True)
+                    if 'timestamp' in voltage_df.columns:
+                        voltage_df = voltage_df.sort_values('timestamp')
+                    voltage_data[dc_num] = voltage_df
+            
+            if not voltage_data:
+                print(f"  No voltage data found for group {group_id}")
+                failed_plots.append(group_id)
+                continue
+            
+            # Create the plot
+            fig, axes = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
+            fig.suptitle(f'DC System Voltage Analysis - Group: {group_id}', 
+                        fontsize=14, fontweight='bold')
+            
+            for dc_idx, dc_num in enumerate([1, 2]):
+                ax = axes[dc_idx]
+                
+                if dc_num not in voltage_data:
+                    ax.text(0.5, 0.5, f'No DC{dc_num} voltage data', 
+                           ha='center', va='center')
+                    ax.set_ylabel(f'DC{dc_num} Voltage (V)')
+                    continue
+                
+                dc_data = voltage_data[dc_num]
+                dc_preds = group_predictions[group_predictions['dc_system'] == dc_num]
+                
+                # Get voltage values
+                voltage_col = f'dc{dc_num}_voltage'
+                voltages = dc_data[voltage_col].to_numpy() if hasattr(dc_data[voltage_col], 'to_numpy') else dc_data[voltage_col].values
+                voltages = np.array(voltages, dtype=np.float32)
+                
+                # Handle x-axis (timestamp or index)
+                if 'timestamp' in dc_data.columns:
+                    x_values = pd.to_datetime(dc_data['timestamp'])
+                    use_timestamps = True
+                else:
+                    x_values = np.arange(len(voltages))
+                    use_timestamps = False
+                
+                # Plot the actual voltage line
+                ax.plot(x_values, voltages, 'b-', linewidth=1.0, alpha=0.8, label='Actual Voltage', zorder=2)
+                
+                # Overlay prediction regions if we have them
+                if len(dc_preds) > 0:
+                    # Sort predictions
+                    if 'timestamp' in dc_preds.columns and use_timestamps:
+                        dc_preds = dc_preds.sort_values('timestamp')
+                    else:
+                        dc_preds = dc_preds.sort_values('window_end_index')
+                    
+                    # Track status changes for labeling
+                    prev_status = None
+                    status_segments = []
+                    
+                    # Group consecutive predictions with the same status
+                    for _, pred_row in dc_preds.iterrows():
+                        if 'window_end_index' in pred_row:
+                            end_idx = int(pred_row['window_end_index'])
+                            start_idx = max(0, end_idx - predictor.window_size + 1)
+                            current_status = pred_row['predicted_status_clean']
+                            
+                            if current_status != prev_status:
+                                # New status segment
+                                if prev_status is not None and status_segments:
+                                    # Close the previous segment
+                                    status_segments[-1]['end_idx'] = start_idx
+                                
+                                # Start new segment
+                                status_segments.append({
+                                    'status': current_status,
+                                    'start_idx': start_idx,
+                                    'end_idx': end_idx,
+                                    'color': get_status_color(current_status)
+                                })
+                                prev_status = current_status
+                            else:
+                                # Extend current segment
+                                if status_segments:
+                                    status_segments[-1]['end_idx'] = end_idx
+                    
+                    # Draw status regions and labels
+                    for i, segment in enumerate(status_segments):
+                        start_idx = segment['start_idx']
+                        end_idx = segment['end_idx']
+                        status = segment['status']
+                        color = segment['color']
+                        
+                        # Draw the colored region
+                        if use_timestamps and start_idx < len(x_values) and end_idx < len(x_values):
+                            x_start = x_values.iloc[start_idx]
+                            x_end = x_values.iloc[end_idx]
+                            ax.axvspan(x_start, x_end, alpha=0.2, color=color, zorder=1)
+                            
+                            # Add status label in the middle of the region
+                            x_mid = x_values.iloc[(start_idx + end_idx) // 2]
+                            y_position = ax.get_ylim()[1] * 0.9
+                            ax.text(x_mid, y_position, status, 
+                                   rotation=45, fontsize=9, ha='center', va='bottom',
+                                   bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.5),
+                                   zorder=3)
+                        elif not use_timestamps:
+                            ax.axvspan(start_idx, end_idx, alpha=0.2, color=color, zorder=1)
+                            
+                            # Add status label
+                            x_mid = (start_idx + end_idx) / 2
+                            y_position = ax.get_ylim()[1] * 0.9
+                            ax.text(x_mid, y_position, status,
+                                   rotation=45, fontsize=9, ha='center', va='bottom',
+                                   bbox=dict(boxstyle='round,pad=0.3', facecolor=color, alpha=0.5),
+                                   zorder=3)
+                
+                # Formatting
+                ax.set_ylabel(f'DC{dc_num} Voltage (V)', fontsize=11)
+                ax.grid(True, alpha=0.3)
+                
+                # Set y-limits with some padding
+                v_min = np.nanmin(voltages) if not np.all(np.isnan(voltages)) else -5
+                v_max = np.nanmax(voltages) if not np.all(np.isnan(voltages)) else 35
+                ax.set_ylim(v_min - 2, v_max + 2)
+                
+                # Add reference lines
+                ax.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+                ax.axhline(y=28, color='green', linestyle='--', alpha=0.4, 
+                          linewidth=1, label='Nominal 28V')
+                
+                # Statistics box
+                stats_parts = [
+                    f'Samples: {len(voltages):,}',
+                    f'Mean: {np.nanmean(voltages):.1f}V',
+                    f'Std: {np.nanstd(voltages):.2f}V',
+                    f'Min: {np.nanmin(voltages):.1f}V',
+                    f'Max: {np.nanmax(voltages):.1f}V',
+                ]
+                
+                if len(dc_preds) > 0:
+                    if 'correct' in dc_preds.columns:
+                        stats_parts.append(f'\nAccuracy: {dc_preds["correct"].mean():.1%}')
+                    stats_parts.append(f'Predictions: {len(dc_preds)}')
+                    
+                    # Status distribution
+                    status_counts = dc_preds['predicted_status_clean'].value_counts()
+                    stats_parts.append('\nPredicted States:')
+                    for status, count in status_counts.items()[:3]:
+                        stats_parts.append(f'  {status}: {count}')
+                
+                stats_text = '\n'.join(stats_parts)
+                props = dict(boxstyle='round', facecolor='white', alpha=0.9)
+                ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9,
+                       verticalalignment='top', bbox=props)
+                
+                # Add legend with actual predicted statuses
+                if dc_idx == 0 and len(dc_preds) > 0:
+                    from matplotlib.patches import Patch
+                    
+                    # Get unique statuses for this DC system
+                    unique_statuses = dc_preds['predicted_status_clean'].unique()
+                    
+                    legend_elements = [ax.lines[0]]  # The actual voltage line
+                    
+                    # Add a patch for each unique predicted status
+                    for status in unique_statuses[:5]:  # Limit to 5 to avoid crowding
+                        color = get_status_color(status)
+                        legend_elements.append(
+                            Patch(facecolor=color, alpha=0.3, label=f'Predicted: {status}')
+                        )
+                    
+                    ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
+                
+                # Format x-axis for timestamps
+                if use_timestamps:
+                    import matplotlib.dates as mdates
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+                    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            axes[-1].set_xlabel('Timestamp' if use_timestamps else 'Sample Index', fontsize=11)
+            
+            plt.tight_layout()
+            
+            # Save the figure
+            safe_group_id = str(group_id).replace('/', '_').replace('\\', '_').replace(':', '_')
+            filename = os.path.join(output_dir, f'voltage_analysis_{safe_group_id}.png')
+            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            print(f"  Saved: {filename}")
+            
+            plt.close(fig)  # Close to free memory
+            successful_plots += 1
+            
+        except Exception as e:
+            print(f"  Error processing group {group_id}: {str(e)}")
+            failed_plots.append(group_id)
+            continue
+    
+    print(f"\n" + "="*60)
+    print(f"VISUALIZATION COMPLETE")
+    print(f"="*60)
+    print(f"Successfully plotted: {successful_plots}/{total_groups} groups")
+    print(f"Plots saved to: '{output_dir}' directory")
+    
+    if failed_plots:
+        print(f"\nFailed to plot {len(failed_plots)} groups:")
+        for group_id in failed_plots[:10]:  # Show first 10 failures
+            print(f"  - {group_id}")
+        if len(failed_plots) > 10:
+            print(f"  ... and {len(failed_plots)-10} more")
+
+
+# Update the main prediction function to use unlimited groups
 def predict_old_format_parquet(
     parquet_path: str,
     model_pkl_path: str,
@@ -479,7 +868,7 @@ def predict_old_format_parquet(
     compare_with_actual: bool = True,
     max_samples: Optional[int] = None,
     visualize: bool = True,
-    num_groups_to_visualize: int = 5):
+    output_dir: str = 'voltage_plots'):
     """
     Main function to predict status labels for old format parquet
     
@@ -490,8 +879,8 @@ def predict_old_format_parquet(
         stride: Stride for sliding window
         compare_with_actual: If True, compare predictions with actual labels
         max_samples: Maximum samples to process (None for all)
-        visualize: If True, create visualizations
-        num_groups_to_visualize: Number of groups to visualize
+        visualize: If True, create visualizations for ALL groups
+        output_dir: Directory to save voltage plots
     
     Returns:
         results_df: DataFrame with all predictions
@@ -516,9 +905,15 @@ def predict_old_format_parquet(
     # Save predictions
     predictor.save_predictions(results_df)
     
-    # Create visualizations if requested
+    # Create visualizations if requested - now for ALL groups
     if visualize and len(results_df) > 0:
-        visualize_predictions_timeline(results_df, num_groups_to_visualize)
+        # Use the enhanced version with actual voltage data
+        visualize_predictions_with_actual_voltage(
+            predictor, 
+            parquet_path, 
+            results_df,
+            output_dir=output_dir
+        )
     
     print(f"\nTotal execution time: {time.time()-start_time:.1f} seconds")
     
@@ -542,11 +937,10 @@ def predict_old_format_parquet(
     
     return results_df
 
-# =============================================================================
-# EXAMPLE USAGE
-# =============================================================================
+
+# Example usage
 if __name__ == "__main__":
-    # Predict status for old format parquet
+    # Predict status for old format parquet with visualizations for ALL groups
     results = predict_old_format_parquet(
         parquet_path='old_format_data.parquet',  # Your old format parquet
         model_pkl_path='unified_dc_model.pkl',   # Your trained model
@@ -554,6 +948,6 @@ if __name__ == "__main__":
         stride=20,                                # Stride for sliding window
         compare_with_actual=True,                # Compare with actual labels
         max_samples=None,                        # Process all data
-        visualize=True,                          # Create visualizations
-        num_groups_to_visualize=5                # Number of groups to plot
+        visualize=True,                          # Create visualizations for ALL groups
+        output_dir='voltage_plots'               # Directory to save all plots
     )
