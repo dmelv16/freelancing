@@ -1,0 +1,57 @@
+Of course. This Python script is a powerful automated tool designed to investigate specific errors from test reports to see if they're real problems or just temporary glitches.
+
+Here's a breakdown of what it does, section by section. 🧑‍💻
+
+***
+
+### The Big Picture: The Goal 🎯
+
+Imagine you have test reports (Excel files) saying a device sent a bad message. The goal of this script is to act like a detective. It checks the raw data logs (CSV files) to see if the device sent a bad message on one channel (Bus A) but then immediately sent the *correct* message on another channel (Bus B) just milliseconds later. If it finds this quick correction, it marks the error as a "bus monitor error" (a temporary glitch), not a "true failure."
+
+---
+
+### Part 1: Setup and Blueprints (`MessageError`, `ValidationResult`, `MessageDefinitions`)
+
+This first part of the script doesn't *do* anything yet; it just sets up the blueprints and rules for the main task.
+
+* `MessageError` and `ValidationResult`: These are simple data containers (`dataclasses`). Think of them as custom filing folders. `MessageError` holds all the details of a single error found in an Excel file (timestamp, what was expected, what was found, etc.). `ValidationResult` holds the final verdict after the investigation.
+* `MessageDefinitions` **(The Rulebook)**: This is the script's "brain." It contains the rules for every message type. It knows:
+    * Which messages have static, unchanging data (`static: True`).
+    * Which messages have data that changes in a sequence, like a counter (`static: False`).
+    * How to identify different message subtypes (e.g., telling a `190r-1` from a `190r-2`).
+
+This class is crucial because it separates the rules from the main logic, making the script easy to update with new message types.
+
+***
+
+### Part 2: The Main Worker (`BusMonitorValidator` class)
+
+This class does all the heavy lifting. It's the detective that carries out the investigation.
+
+* **Step 1: Find the Errors (`process_all_reports`)**
+    * The script loops through every Excel file in the folder you provide.
+    * Inside each file, it scans every cell in the special message columns (like `[20r]`).
+    * If it finds a cell containing **"MIXED"** or **"FALSE,"** it flags it for investigation.
+* **Step 2: Decode the Clues (`parse_error_cell`)**
+    * For each flagged error, it uses a regular expression (a powerful text-searching pattern) to pull out the key details from the error message: **what** data word failed, **when** it failed (the timestamp), what the **expected** value was, and what the **incorrect** value was.
+* **Step 3: Find the Right Log File (`get_csv_filename`)**
+    * Using the `unit_id`, `station`, and `save` info from the Excel row, it pieces together the exact name of the raw data CSV file it needs to look at.
+* **Step 4: The Investigation (`validate_error`)**
+    This is the core of the script. For a single error, it:
+    1.  **Opens the CSV file** and loads the data.
+    2.  **Zooms in on the timestamp** of the error, looking at data just a few milliseconds before and after.
+    3.  **Finds the bad message** on one of the buses (e.g., Bus A).
+    4.  **Determines the true expected value**. If it's a sequence, it looks at the *previous* message to figure out what the *next* value should have been.
+    5.  **Searches for a correction**: It then looks on the *opposite bus* (Bus B) within that same tiny time window for a message of the same type that has the **correct** expected value.
+* **Step 5: The Verdict**
+    * If a correcting message is found, the result is logged as a **`BUS_MONITOR_ERROR`**. ✅
+    * If no correction is found, it's logged as a **`TRUE_FAILURE`**. ❌
+
+---
+
+### Part 3: Reporting and Execution (`generate_report` and `main`)
+
+This final part wraps everything up.
+
+* `generate_report`: Once all the investigations are complete, this function takes all the `ValidationResult` objects and compiles them into a clean CSV report. It also prints a handy summary to the screen showing how many errors were glitches versus true failures.
+* `main` function: This is the entry point that runs when you execute the script from your command line. It handles command-line arguments (like telling the script where to find the Excel and CSV folders) and kicks off the whole process.
