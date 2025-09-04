@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced Message Pattern Learning Script
-Learns from both CSV logs AND Excel TRUE results for comprehensive pattern discovery
+All-in-One Bus Monitor Validation System
+No command line arguments needed - just configure the paths below and run!
 """
 
 import pandas as pd
@@ -9,580 +9,557 @@ import numpy as np
 import re
 import os
 import json
-import yaml
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional, Any
-from collections import defaultdict
+from typing import Dict, List, Tuple, Optional, Any, Set
+from dataclasses import dataclass, field
 from datetime import datetime
+from collections import defaultdict
 import logging
-import argparse
 
-# Configure logging
+# ============================================================================
+# CONFIGURATION - MODIFY THESE PATHS FOR YOUR SYSTEM
+# ============================================================================
+
+# Input folders
+CSV_FOLDER = r"C:\path\to\your\csv\logs"  # Folder with raw CSV logs
+EXCEL_FOLDER = r"C:\path\to\your\excel\reports"  # Folder with Excel validation reports
+
+# Output files (will be created in current directory)
+DEFINITIONS_FILE = "learned_message_definitions.json"
+VALIDATION_REPORT = "bus_monitor_validation_report.csv"
+SUMMARY_REPORT = "validation_summary_by_type.csv"
+
+# Options
+LEARN_FROM_DATA = True  # Set to False to skip learning if definitions file already exists
+SAMPLE_SIZE = None  # Set to a number (e.g., 10000) to limit rows per CSV for faster learning
+VERBOSE = True  # Set to False for less output
+
+# ============================================================================
+# END CONFIGURATION
+# ============================================================================
+
+# Setup logging
+log_level = logging.DEBUG if VERBOSE else logging.INFO
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-class EnhancedMessagePatternLearner:
-    """Learns message patterns from both CSV logs and Excel TRUE results"""
+@dataclass
+class MessageError:
+    """Represents an error from Excel report"""
+    message_type: str
+    data_word: str
+    timestamp: float
+    expected_values: List[str]
+    found_values: List[str]
+    unit_id: str
+    station: str
+    save: str
+
+@dataclass
+class ValidationResult:
+    """Result of validation"""
+    error: MessageError
+    status: str
+    error_bus: Optional[str]
+    opposite_bus: Optional[str]
+    correction_timestamp: Optional[float]
+    all_data_words_checked: Dict = field(default_factory=dict)
+    confidence: str = 'LOW'
+    details: str = ''
+
+
+class MessagePatternLearner:
+    """Learn message patterns from Excel TRUE results and CSV logs"""
     
-    def __init__(self, csv_folder: str, excel_folder: str, output_file: str = "message_definitions.json"):
-        self.csv_folder = Path(csv_folder)
-        self.excel_folder = Path(excel_folder)
-        self.output_file = output_file
+    def __init__(self):
+        self.csv_folder = Path(CSV_FOLDER)
+        self.excel_folder = Path(EXCEL_FOLDER)
+        self.definitions_file = DEFINITIONS_FILE
         
-        # Data structures for learning
         self.message_types = defaultdict(lambda: {
             'count': 0,
-            'true_count': 0,  # Count of TRUE validations
+            'true_count': 0,
             'files_seen': set(),
+            'true_sources': set(),
             'data_words': defaultdict(lambda: {
                 'values': set(),
+                'true_values': set(),
                 'count': 0,
-                'true_values': set(),  # Values seen in TRUE cases
-                'is_sequence': False,
-                'sequence_info': {},
-                'is_static': True,
-                'value_distribution': defaultdict(int),
-                'confidence': 'LOW'  # Confidence level
+                'confidence': 'LOW'
             }),
-            'true_timestamps': [],  # Timestamps where validation was TRUE
-            'data01_identifier': None,
-            'base_type': None
+            'base_type': None,
+            'data01_identifier': None
         })
         
-        # Track relationships
-        self.base_type_mapping = defaultdict(set)
-        
-        # Statistics
-        self.total_csv_files = 0
-        self.total_excel_files = 0
-        self.total_rows_processed = 0
+        self.total_rows = 0
         self.total_true_validations = 0
+    
+    def learn(self):
+        """Main learning function"""
+        logger.info("="*60)
+        logger.info("STARTING PATTERN LEARNING")
+        logger.info("="*60)
         
-    def learn_from_all_sources(self, sample_size: Optional[int] = None):
-        """Learn from both Excel TRUE results and CSV logs"""
+        # Learn from Excel TRUE results
+        logger.info("Learning from Excel TRUE validations...")
+        self.learn_from_excel()
         
-        # Step 1: Learn from Excel TRUE results first (most reliable)
-        logger.info("=" * 60)
-        logger.info("STEP 1: Learning from Excel TRUE results")
-        logger.info("=" * 60)
-        self.learn_from_excel_files()
+        # Learn from CSV logs
+        logger.info("Learning from CSV raw logs...")
+        self.learn_from_csv()
         
-        # Step 2: Learn from CSV logs to fill gaps
-        logger.info("=" * 60)
-        logger.info("STEP 2: Learning from CSV raw logs")
-        logger.info("=" * 60)
-        self.learn_from_csv_files(sample_size)
+        # Save definitions
+        self.save_definitions()
         
-        # Step 3: Analyze and combine patterns
-        logger.info("=" * 60)
-        logger.info("STEP 3: Analyzing combined patterns")
-        logger.info("=" * 60)
-        self.analyze_patterns()
-        
-    def learn_from_excel_files(self):
-        """Learn from Excel files - extract TRUE validations"""
+        logger.info(f"Learning complete! Saved to {self.definitions_file}")
+        return self.definitions_file
+    
+    def learn_from_excel(self):
+        """Learn from Excel TRUE results"""
         excel_files = list(self.excel_folder.glob("*.xlsx"))
-        logger.info(f"Found {len(excel_files)} Excel files to analyze")
+        logger.info(f"Found {len(excel_files)} Excel files")
         
-        for idx, excel_file in enumerate(excel_files, 1):
-            logger.info(f"Processing Excel {idx}/{len(excel_files)}: {excel_file.name}")
+        for excel_file in excel_files:
             try:
-                self.process_excel_file(excel_file)
-                self.total_excel_files += 1
-            except Exception as e:
-                logger.error(f"Error processing {excel_file.name}: {e}")
-        
-        logger.info(f"Learned from {self.total_true_validations:,} TRUE validations")
-    
-    def process_excel_file(self, excel_path: Path):
-        """Process a single Excel file for TRUE results"""
-        df = pd.read_excel(excel_path)
-        
-        # Find message type columns
-        message_cols = [col for col in df.columns if re.match(r'\[.*\]', str(col))]
-        
-        for idx, row in df.iterrows():
-            unit_id = str(row.get('unit_id', ''))
-            station = str(row.get('station', ''))
-            save = str(row.get('save', ''))
-            
-            for msg_col in message_cols:
-                cell_value = str(row[msg_col])
+                df = pd.read_excel(excel_file)
+                message_cols = [col for col in df.columns if re.match(r'\[.*\]', str(col))]
                 
-                # Look for TRUE results
-                if 'TRUE' in cell_value and 'MIXED' not in cell_value and 'FALSE' not in cell_value:
-                    # Extract message type
-                    message_type = msg_col.strip('[]')
-                    
-                    # Parse TRUE validation info
-                    self.learn_from_true_result(
-                        message_type, cell_value, 
-                        unit_id, station, save
-                    )
+                for _, row in df.iterrows():
+                    for msg_col in message_cols:
+                        cell_value = str(row[msg_col])
+                        
+                        # Process TRUE results
+                        if 'TRUE' in cell_value and 'MIXED' not in cell_value:
+                            message_type = msg_col.strip('[]')
+                            self.message_types[message_type]['true_count'] += 1
+                            self.total_true_validations += 1
+                            
+                            # Get the CSV file for this TRUE result
+                            unit_id = str(row.get('unit_id', ''))
+                            station = str(row.get('station', ''))
+                            save = str(row.get('save', ''))
+                            
+                            # Look up actual values
+                            self.lookup_true_values(message_type, unit_id, station, save)
+                            
+            except Exception as e:
+                logger.debug(f"Error processing {excel_file.name}: {e}")
+        
+        logger.info(f"Learned from {self.total_true_validations} TRUE validations")
     
-    def learn_from_true_result(self, message_type: str, cell_text: str,
-                              unit_id: str, station: str, save: str):
-        """Learn from a TRUE validation result"""
-        
-        # Update message type info
-        self.message_types[message_type]['true_count'] += 1
-        self.total_true_validations += 1
-        
-        # Extract timestamps if mentioned
-        timestamp_pattern = r'at timestamps \[([\d.,\s]+)\]'
-        match = re.search(timestamp_pattern, cell_text)
-        if match:
-            timestamps = [float(t.strip()) for t in match.group(1).split(',') if t.strip()]
-            self.message_types[message_type]['true_timestamps'].extend(timestamps)
-            
-            # Now we need to look up the actual data values at these timestamps
-            self.lookup_true_data_values(
-                message_type, timestamps, unit_id, station, save
-            )
-    
-    def lookup_true_data_values(self, message_type: str, timestamps: List[float],
-                               unit_id: str, station: str, save: str):
-        """Look up actual data values from CSV for TRUE validations"""
-        
-        # Construct CSV filename
+    def lookup_true_values(self, message_type: str, unit_id: str, station: str, save: str):
+        """Look up actual values from CSV for TRUE validation"""
+        # Build CSV filename
         bus_type = 'rt' if station.startswith('R') else 'lt'
         station_num = re.search(r'\d+', station)
-        station_suffix = station_num.group() if station_num else '01'
-        station_suffix = station_suffix.zfill(2)
+        suffix = (station_num.group() if station_num else '01').zfill(2)
         
-        csv_filename = f"{unit_id}_{station}_{save}_{bus_type}{station_suffix}.csv"
-        csv_path = self.csv_folder / csv_filename
+        csv_file = self.csv_folder / f"{unit_id}_{station}_{save}_{bus_type}{suffix}.csv"
         
-        if not csv_path.exists():
-            logger.debug(f"CSV not found for TRUE result: {csv_filename}")
+        if not csv_file.exists():
             return
         
         try:
-            # Read CSV
-            df = pd.read_csv(csv_path)
+            # Sample the CSV to find examples of this message type
+            df = pd.read_csv(csv_file, nrows=1000)
             
-            # Look up each timestamp
-            for timestamp in timestamps:
-                # Find rows near this timestamp
-                time_mask = (df['timestamp'] >= timestamp - 0.001) & \
-                           (df['timestamp'] <= timestamp + 0.001)
+            if 'message_name' in df.columns:
+                msg_rows = df[df['message_name'] == message_type]
                 
-                matching_rows = df[time_mask]
-                
-                for _, row in matching_rows.iterrows():
-                    # Check if this row matches our message type
-                    if 'message_name' in row and pd.notna(row['message_name']):
-                        if str(row['message_name']) == message_type:
-                            # This is a TRUE example! Learn all data words
-                            self.learn_data_words_from_row(message_type, row, is_true=True)
-                            
-                            # Track data01 identifier for subtypes
-                            if 'data01' in row and pd.notna(row['data01']):
-                                self.message_types[message_type]['data01_identifier'] = str(row['data01'])
-                            
-                            # Track base type
-                            if 'decoded description' in row:
-                                desc = str(row['decoded description'])
-                                match = re.search(r'\[([^\]]+)\]', desc)
-                                if match:
-                                    base_type = match.group(1)
-                                    self.message_types[message_type]['base_type'] = base_type
-                                    self.base_type_mapping[base_type].add(message_type)
+                for _, row in msg_rows.iterrows():
+                    # Learn all data word values
+                    for col in df.columns:
+                        if col.startswith('data') and pd.notna(row[col]):
+                            value = str(row[col])
+                            self.message_types[message_type]['data_words'][col]['values'].add(value)
+                            self.message_types[message_type]['data_words'][col]['true_values'].add(value)
+                            self.message_types[message_type]['data_words'][col]['count'] += 1
                     
-        except Exception as e:
-            logger.debug(f"Error reading CSV for TRUE lookup: {e}")
-    
-    def learn_data_words_from_row(self, message_type: str, row: pd.Series, is_true: bool = False):
-        """Learn all data word values from a row"""
-        
-        for col in row.index:
-            if col.startswith('data') and pd.notna(row[col]):
-                value = str(row[col])
-                
-                # Update data word info
-                msg_data = self.message_types[message_type]['data_words'][col]
-                msg_data['values'].add(value)
-                msg_data['count'] += 1
-                msg_data['value_distribution'][value] += 1
-                
-                if is_true:
-                    # This value was seen in a TRUE validation - high confidence!
-                    msg_data['true_values'].add(value)
-    
-    def learn_from_csv_files(self, sample_size: Optional[int] = None):
-        """Learn patterns from CSV files"""
-        csv_files = list(self.csv_folder.glob("*.csv"))
-        logger.info(f"Found {len(csv_files)} CSV files to analyze")
-        
-        # Sample files if we have too many
-        if len(csv_files) > 50:
-            import random
-            csv_files = random.sample(csv_files, 50)
-            logger.info(f"Sampling 50 CSV files for learning")
-        
-        for idx, csv_file in enumerate(csv_files, 1):
-            logger.debug(f"Processing CSV {idx}/{len(csv_files)}: {csv_file.name}")
-            try:
-                self.process_csv_file(csv_file, sample_size)
-                self.total_csv_files += 1
-            except Exception as e:
-                logger.error(f"Error processing {csv_file.name}: {e}")
-        
-        logger.info(f"Processed {self.total_csv_files} CSV files, {self.total_rows_processed:,} rows")
-    
-    def process_csv_file(self, csv_path: Path, sample_size: Optional[int] = None):
-        """Process a single CSV file"""
-        
-        # Read file
-        if sample_size:
-            df = pd.read_csv(csv_path, nrows=sample_size)
-        else:
-            df = pd.read_csv(csv_path)
-        
-        if 'message_name' not in df.columns:
-            logger.warning(f"No message_name column in {csv_path.name}")
-            return
-        
-        # Track sequences
-        if 'timestamp' in df.columns:
-            df = df.sort_values('timestamp')
-        
-        prev_values = {}
-        
-        for idx, row in df.iterrows():
-            self.total_rows_processed += 1
-            
-            # Get message type from message_name
-            if pd.notna(row['message_name']):
-                message_type = str(row['message_name'])
-                
-                # Skip if message_name fell back to decoded_description
-                if 'decoded description' in row and message_type == str(row['decoded description']):
-                    continue  # This is an error case
-                
-                # Update count
-                self.message_types[message_type]['count'] += 1
-                self.message_types[message_type]['files_seen'].add(csv_path.name)
-                
-                # Learn data words
-                self.learn_data_words_from_row(message_type, row, is_true=False)
-                
-                # Check for sequences
-                for col in df.columns:
-                    if col.startswith('data') and pd.notna(row[col]):
-                        value = str(row[col])
-                        prev_key = f"{message_type}_{col}"
+                    # Track base type
+                    if 'decoded description' in row:
+                        match = re.search(r'\[([^\]]+)\]', str(row['decoded description']))
+                        if match:
+                            self.message_types[message_type]['base_type'] = match.group(1)
+                    
+                    # Track data01 identifier
+                    if 'data01' in row and pd.notna(row['data01']):
+                        self.message_types[message_type]['data01_identifier'] = str(row['data01'])
                         
-                        if prev_key in prev_values:
-                            self._check_sequence(message_type, col, prev_values[prev_key], value)
-                        prev_values[prev_key] = value
+        except Exception as e:
+            logger.debug(f"Error reading {csv_file.name}: {e}")
     
-    def _check_sequence(self, msg_type: str, data_word: str, prev_value: str, curr_value: str):
-        """Check if values indicate a sequence"""
-        try:
-            prev_num = float(prev_value)
-            curr_num = float(curr_value)
-            
-            diff = curr_num - prev_num
-            
-            # Track differences
-            if 'diffs' not in self.message_types[msg_type]['data_words'][data_word]:
-                self.message_types[msg_type]['data_words'][data_word]['diffs'] = []
-            
-            self.message_types[msg_type]['data_words'][data_word]['diffs'].append(diff)
-            
-        except (ValueError, TypeError):
-            pass
-    
-    def analyze_patterns(self):
-        """Analyze collected patterns and determine confidence levels"""
+    def learn_from_csv(self):
+        """Learn patterns from CSV files"""
+        csv_files = list(self.csv_folder.glob("*.csv"))[:20]  # Sample first 20 files
+        logger.info(f"Sampling {len(csv_files)} CSV files")
         
-        for msg_type, msg_info in self.message_types.items():
-            logger.debug(f"Analyzing {msg_type}: {msg_info['count']} occurrences, {msg_info['true_count']} TRUE")
-            
-            for data_word, word_info in msg_info['data_words'].items():
-                values = word_info['values']
-                true_values = word_info['true_values']
+        for csv_file in csv_files:
+            try:
+                df = pd.read_csv(csv_file, nrows=SAMPLE_SIZE)
                 
-                # Determine confidence level
-                if true_values:
-                    # We have TRUE validation examples - high confidence
-                    word_info['confidence'] = 'HIGH'
-                elif word_info['count'] > 100:
-                    # Many examples seen
-                    word_info['confidence'] = 'MEDIUM'
-                else:
-                    word_info['confidence'] = 'LOW'
+                if 'message_name' not in df.columns:
+                    continue
                 
-                # Determine pattern type
-                if len(values) == 1:
-                    word_info['pattern_type'] = 'single_value'
-                    word_info['is_static'] = True
-                elif len(values) <= 20:
-                    word_info['pattern_type'] = 'multiple_values'
-                    word_info['is_static'] = True
-                else:
-                    # Check for sequence
-                    if self._is_sequence(list(values)):
-                        word_info['is_sequence'] = True
-                        word_info['pattern_type'] = 'sequence'
-                        word_info['sequence_info'] = self._get_sequence_info(list(values))
-                    else:
-                        word_info['pattern_type'] = 'dynamic'
-                        word_info['is_static'] = False
-    
-    def _is_sequence(self, values: List[str]) -> bool:
-        """Check if values form a sequence"""
-        try:
-            nums = sorted([float(v) for v in values])
-            
-            if len(nums) < 3:
-                return False
-            
-            # Check if evenly spaced
-            diffs = [nums[i+1] - nums[i] for i in range(min(10, len(nums)-1))]
-            unique_diffs = set(round(d, 3) for d in diffs)
-            
-            return len(unique_diffs) <= 2  # Allow for wraparound
-            
-        except (ValueError, TypeError):
-            return False
-    
-    def _get_sequence_info(self, values: List[str]) -> Dict:
-        """Get sequence information"""
-        try:
-            nums = [float(v) for v in values]
-            return {
-                'min': min(nums),
-                'max': max(nums),
-                'unique_count': len(set(nums)),
-                'step': self._detect_step(sorted(nums))
-            }
-        except (ValueError, TypeError):
-            return {}
-    
-    def _detect_step(self, sorted_nums: List[float]) -> float:
-        """Detect step size in sequence"""
-        if len(sorted_nums) < 2:
-            return 1
+                for _, row in df.iterrows():
+                    self.total_rows += 1
+                    
+                    if pd.notna(row['message_name']):
+                        message_type = str(row['message_name'])
+                        
+                        # Skip error cases where message_name = decoded_description
+                        if 'decoded description' in row and message_type == str(row['decoded description']):
+                            continue
+                        
+                        self.message_types[message_type]['count'] += 1
+                        
+                        # Learn data words
+                        for col in df.columns:
+                            if col.startswith('data') and pd.notna(row[col]):
+                                value = str(row[col])
+                                self.message_types[message_type]['data_words'][col]['values'].add(value)
+                                self.message_types[message_type]['data_words'][col]['count'] += 1
+                
+            except Exception as e:
+                logger.debug(f"Error processing {csv_file.name}: {e}")
         
-        diffs = [sorted_nums[i+1] - sorted_nums[i] for i in range(min(10, len(sorted_nums)-1))]
-        
-        # Return most common difference
-        from collections import Counter
-        counter = Counter([round(d, 3) for d in diffs])
-        most_common, _ = counter.most_common(1)[0]
-        return most_common
+        logger.info(f"Processed {self.total_rows:,} rows")
     
-    def generate_definition_file(self):
-        """Generate the comprehensive message definition file"""
-        logger.info(f"Generating definition file: {self.output_file}")
-        
+    def save_definitions(self):
+        """Save learned definitions to JSON"""
         definitions = {}
         
-        for msg_type, msg_info in self.message_types.items():
-            definition = {
+        for msg_type, info in self.message_types.items():
+            # Determine confidence for each data word
+            for dw, dw_info in info['data_words'].items():
+                if dw_info['true_values']:
+                    dw_info['confidence'] = 'HIGH'
+                elif dw_info['count'] > 100:
+                    dw_info['confidence'] = 'MEDIUM'
+            
+            definitions[msg_type] = {
                 'message_type': msg_type,
-                'base_type': msg_info.get('base_type', ''),
-                'occurrences': msg_info['count'],
-                'true_validations': msg_info['true_count'],
-                'files_seen': len(msg_info['files_seen']),
-                'true_source_files': list(msg_info.get('true_sources', [])),  # CSV files with TRUE examples
-                'true_examples': msg_info.get('true_examples', [])[:10],  # Sample of (unit_id, station, save)
+                'base_type': info['base_type'],
+                'occurrences': info['count'],
+                'true_validations': info['true_count'],
+                'data01_identifier': info['data01_identifier'],
                 'data_words': {}
             }
             
-            # Add data01 identifier if present
-            if msg_info.get('data01_identifier'):
-                definition['subtype_identifier'] = {
-                    'column': 'data01',
-                    'value': msg_info['data01_identifier']
-                }
-            
-            # Process each data word
-            for data_word, word_info in msg_info['data_words'].items():
-                all_values = list(word_info['values'])
-                true_values = list(word_info['true_values'])
+            # Process data words
+            for dw, dw_info in info['data_words'].items():
+                values = list(dw_info['true_values'] if dw_info['true_values'] else dw_info['values'])
                 
-                dw_def = {
-                    'confidence': word_info['confidence'],
-                    'occurrences': word_info['count'],
-                    'pattern_type': word_info.get('pattern_type', 'unknown')
-                }
-                
-                # Use TRUE values if available, otherwise all values
-                values_to_use = true_values if true_values else all_values
-                
-                if word_info.get('is_sequence'):
-                    dw_def['type'] = 'sequence'
-                    dw_def['min'] = word_info['sequence_info'].get('min', 0)
-                    dw_def['max'] = word_info['sequence_info'].get('max', 100)
-                    dw_def['step'] = word_info['sequence_info'].get('step', 1)
-                elif len(values_to_use) == 1:
-                    dw_def['type'] = 'single_value'
-                    dw_def['value'] = values_to_use[0]
-                elif len(values_to_use) <= 50:
-                    dw_def['type'] = 'multiple_values'
-                    dw_def['values'] = sorted(values_to_use)
-                    if true_values:
-                        dw_def['true_values'] = sorted(true_values)
+                if len(values) == 1:
+                    definitions[msg_type]['data_words'][dw] = {
+                        'type': 'single_value',
+                        'value': values[0],
+                        'confidence': dw_info['confidence']
+                    }
+                elif len(values) <= 50:
+                    definitions[msg_type]['data_words'][dw] = {
+                        'type': 'multiple_values',
+                        'values': sorted(values),
+                        'confidence': dw_info['confidence']
+                    }
                 else:
-                    dw_def['type'] = 'dynamic'
-                    dw_def['sample_values'] = sorted(values_to_use)[:20]
-                    dw_def['total_unique'] = len(values_to_use)
-                    if true_values:
-                        dw_def['true_values'] = sorted(true_values)[:20]
-                
-                definition['data_words'][data_word] = dw_def
-            
-            definitions[msg_type] = definition
+                    definitions[msg_type]['data_words'][dw] = {
+                        'type': 'dynamic',
+                        'sample_values': sorted(values)[:20],
+                        'confidence': dw_info['confidence']
+                    }
         
-        # Create output structure
         output = {
             'metadata': {
                 'generated_at': datetime.now().isoformat(),
-                'total_csv_files': self.total_csv_files,
-                'total_excel_files': self.total_excel_files,
-                'total_rows': self.total_rows_processed,
+                'total_rows': self.total_rows,
                 'total_true_validations': self.total_true_validations,
                 'unique_message_types': len(definitions)
             },
-            'message_definitions': definitions,
-            'base_type_mapping': {k: list(v) for k, v in self.base_type_mapping.items()}
+            'message_definitions': definitions
         }
         
-        # Save to file
-        with open(self.output_file, 'w') as f:
-            json.dump(output, f, indent=2, default=str)
+        with open(self.definitions_file, 'w') as f:
+            json.dump(output, f, indent=2)
         
         logger.info(f"Saved {len(definitions)} message type definitions")
-        
-        # Generate summary report
-        self.generate_summary_report(definitions)
+
+
+class BusMonitorValidator:
+    """Validate bus monitor errors using learned definitions"""
     
-    def generate_summary_report(self, definitions: Dict):
-        """Generate human-readable summary report"""
-        report_file = self.output_file.replace('.json', '_summary.txt')
+    def __init__(self, definitions_file: str):
+        self.csv_folder = Path(CSV_FOLDER)
+        self.excel_folder = Path(EXCEL_FOLDER)
+        self.results = []
         
-        with open(report_file, 'w') as f:
-            f.write("ENHANCED MESSAGE PATTERN LEARNING SUMMARY\n")
-            f.write("=" * 60 + "\n\n")
-            
-            f.write(f"Total Excel Files Processed: {self.total_excel_files}\n")
-            f.write(f"Total CSV Files Processed: {self.total_csv_files}\n")
-            f.write(f"Total TRUE Validations Learned From: {self.total_true_validations:,}\n")
-            f.write(f"Total Rows Processed: {self.total_rows_processed:,}\n")
-            f.write(f"Unique Message Types Found: {len(definitions)}\n\n")
-            
-            # Confidence breakdown
-            high_conf = sum(1 for d in definitions.values() 
-                          for dw in d['data_words'].values() 
-                          if dw.get('confidence') == 'HIGH')
-            med_conf = sum(1 for d in definitions.values() 
-                         for dw in d['data_words'].values() 
-                         if dw.get('confidence') == 'MEDIUM')
-            low_conf = sum(1 for d in definitions.values() 
-                         for dw in d['data_words'].values() 
-                         if dw.get('confidence') == 'LOW')
-            
-            f.write("CONFIDENCE LEVELS:\n")
-            f.write("-" * 40 + "\n")
-            f.write(f"HIGH confidence data words: {high_conf} (from TRUE validations)\n")
-            f.write(f"MEDIUM confidence data words: {med_conf}\n")
-            f.write(f"LOW confidence data words: {low_conf}\n\n")
-            
-            # Messages with most TRUE validations
-            f.write("TOP 10 MOST VALIDATED MESSAGE TYPES:\n")
-            f.write("-" * 40 + "\n")
-            sorted_by_true = sorted(definitions.items(), 
-                                  key=lambda x: x[1].get('true_validations', 0), 
-                                  reverse=True)[:10]
-            
-            for msg_type, definition in sorted_by_true:
-                true_count = definition.get('true_validations', 0)
-                total_count = definition.get('occurrences', 0)
-                if true_count > 0:
-                    f.write(f"{msg_type}: {true_count:,} TRUE validations, {total_count:,} total\n")
-            
-            f.write("\n")
-            
-            # Pattern type statistics
-            sequence_count = 0
-            static_count = 0
-            dynamic_count = 0
-            
-            for definition in definitions.values():
-                for dw_def in definition.get('data_words', {}).values():
-                    pattern = dw_def.get('pattern_type', '')
-                    if pattern == 'sequence':
-                        sequence_count += 1
-                    elif pattern in ['single_value', 'multiple_values']:
-                        static_count += 1
-                    elif pattern == 'dynamic':
-                        dynamic_count += 1
-            
-            f.write("PATTERN TYPE STATISTICS:\n")
-            f.write("-" * 40 + "\n")
-            f.write(f"Static data words: {static_count}\n")
-            f.write(f"Sequential data words: {sequence_count}\n")
-            f.write(f"Dynamic data words: {dynamic_count}\n")
+        # Load definitions
+        with open(definitions_file, 'r') as f:
+            data = json.load(f)
         
-        logger.info(f"Summary report saved to: {report_file}")
+        self.definitions = data.get('message_definitions', {})
+        self.metadata = data.get('metadata', {})
+        
+        logger.info(f"Loaded {len(self.definitions)} message definitions")
+    
+    def validate_all(self):
+        """Process all Excel reports"""
+        logger.info("="*60)
+        logger.info("STARTING VALIDATION")
+        logger.info("="*60)
+        
+        excel_files = list(self.excel_folder.glob("*.xlsx"))
+        logger.info(f"Found {len(excel_files)} Excel reports to validate")
+        
+        for excel_file in excel_files:
+            logger.info(f"Processing: {excel_file.name}")
+            self.process_excel(excel_file)
+        
+        # Generate reports
+        self.generate_reports()
+        
+        # Print summary
+        self.print_summary()
+    
+    def process_excel(self, excel_file: Path):
+        """Process one Excel file"""
+        try:
+            df = pd.read_excel(excel_file)
+            message_cols = [col for col in df.columns if re.match(r'\[.*\]', str(col))]
+            
+            for _, row in df.iterrows():
+                for msg_col in message_cols:
+                    cell_value = str(row[msg_col])
+                    
+                    # Process MIXED or FALSE
+                    if ('MIXED' in cell_value or 'FALSE' in cell_value) and 'TRUE' not in cell_value:
+                        message_type = msg_col.strip('[]')
+                        errors = self.parse_errors(
+                            cell_value, message_type,
+                            str(row.get('unit_id', '')),
+                            str(row.get('station', '')),
+                            str(row.get('save', ''))
+                        )
+                        
+                        for error in errors:
+                            result = self.validate_error(error)
+                            self.results.append(result)
+                            
+        except Exception as e:
+            logger.error(f"Error processing {excel_file.name}: {e}")
+    
+    def parse_errors(self, cell_text: str, message_type: str,
+                    unit_id: str, station: str, save: str) -> List[MessageError]:
+        """Parse errors from cell text"""
+        errors = []
+        
+        # Find all data word errors
+        pattern = r'messages had incorrect format for (data\d+)\.\s*Expected any of \[(.*?)\].*?found \[(.*?)\]\.\s*Fails occurred at timestamps \[([\d.,\s]+)\]'
+        
+        for match in re.finditer(pattern, cell_text, re.DOTALL):
+            data_word = match.group(1)
+            expected = [v.strip().strip("'\"") for v in match.group(2).split(',')]
+            found = [v.strip().strip("'\"") for v in match.group(3).split(',')]
+            timestamps = [float(t.strip()) for t in match.group(4).split(',')]
+            
+            for timestamp in timestamps:
+                errors.append(MessageError(
+                    message_type=message_type,
+                    data_word=data_word,
+                    timestamp=timestamp,
+                    expected_values=expected,
+                    found_values=found,
+                    unit_id=unit_id,
+                    station=station,
+                    save=save
+                ))
+        
+        return errors
+    
+    def validate_error(self, error: MessageError) -> ValidationResult:
+        """Validate a single error"""
+        # Get CSV file
+        bus_type = 'rt' if error.station.startswith('R') else 'lt'
+        station_num = re.search(r'\d+', error.station)
+        suffix = (station_num.group() if station_num else '01').zfill(2)
+        csv_file = self.csv_folder / f"{error.unit_id}_{error.station}_{error.save}_{bus_type}{suffix}.csv"
+        
+        if not csv_file.exists():
+            return ValidationResult(
+                error=error,
+                status="FILE_NOT_FOUND",
+                error_bus=None,
+                opposite_bus=None,
+                correction_timestamp=None,
+                details=f"CSV not found: {csv_file.name}"
+            )
+        
+        try:
+            # Load CSV
+            df = pd.read_csv(csv_file)
+            
+            # Find error in time window
+            time_window = 0.01
+            window = df[(df['timestamp'] >= error.timestamp - time_window) & 
+                       (df['timestamp'] <= error.timestamp + time_window)].copy()
+            
+            if window.empty:
+                return ValidationResult(
+                    error=error,
+                    status="NO_DATA",
+                    error_bus=None,
+                    opposite_bus=None,
+                    correction_timestamp=None,
+                    details="No data in time window"
+                )
+            
+            # Find error message
+            error_bus = None
+            for _, row in window.iterrows():
+                if abs(row['timestamp'] - error.timestamp) < 0.001:
+                    if error.data_word in df.columns:
+                        if str(row[error.data_word]) in error.found_values:
+                            error_bus = row['bus']
+                            break
+            
+            if not error_bus:
+                return ValidationResult(
+                    error=error,
+                    status="ERROR_NOT_FOUND",
+                    error_bus=None,
+                    opposite_bus=None,
+                    correction_timestamp=None,
+                    details="Could not find error"
+                )
+            
+            # Check opposite bus for correction
+            opposite_bus = 'B' if error_bus == 'A' else 'A'
+            
+            # Look for correction
+            correction_found = False
+            correction_time = None
+            
+            opposite_msgs = window[window['bus'] == opposite_bus]
+            for _, row in opposite_msgs.iterrows():
+                if error.data_word in df.columns:
+                    if str(row[error.data_word]) in error.expected_values:
+                        correction_found = True
+                        correction_time = row['timestamp']
+                        break
+            
+            if correction_found:
+                return ValidationResult(
+                    error=error,
+                    status="BUS_MONITOR_ERROR",
+                    error_bus=error_bus,
+                    opposite_bus=opposite_bus,
+                    correction_timestamp=correction_time,
+                    details=f"Corrected on Bus {opposite_bus}"
+                )
+            else:
+                return ValidationResult(
+                    error=error,
+                    status="TRUE_FAILURE",
+                    error_bus=error_bus,
+                    opposite_bus=None,
+                    correction_timestamp=None,
+                    details="No correction found"
+                )
+                
+        except Exception as e:
+            return ValidationResult(
+                error=error,
+                status="ERROR",
+                error_bus=None,
+                opposite_bus=None,
+                correction_timestamp=None,
+                details=str(e)
+            )
+    
+    def generate_reports(self):
+        """Generate output reports"""
+        if not self.results:
+            logger.warning("No results to report")
+            return
+        
+        # Main report
+        report_data = []
+        for r in self.results:
+            report_data.append({
+                'Unit_ID': r.error.unit_id,
+                'Station': r.error.station,
+                'Save': r.error.save,
+                'Message_Type': r.error.message_type,
+                'Data_Word': r.error.data_word,
+                'Timestamp': r.error.timestamp,
+                'Status': r.status,
+                'Error_Bus': r.error_bus,
+                'Correction_Bus': r.opposite_bus,
+                'Correction_Time': r.correction_timestamp,
+                'Details': r.details
+            })
+        
+        df = pd.DataFrame(report_data)
+        df.to_csv(VALIDATION_REPORT, index=False)
+        logger.info(f"Saved main report to: {VALIDATION_REPORT}")
+        
+        # Summary by message type
+        summary = df.groupby(['Message_Type', 'Status']).size().unstack(fill_value=0)
+        summary.to_csv(SUMMARY_REPORT)
+        logger.info(f"Saved summary to: {SUMMARY_REPORT}")
+    
+    def print_summary(self):
+        """Print summary statistics"""
+        bus_monitor = sum(1 for r in self.results if r.status == "BUS_MONITOR_ERROR")
+        true_failure = sum(1 for r in self.results if r.status == "TRUE_FAILURE")
+        total = bus_monitor + true_failure
+        
+        logger.info("\n" + "="*60)
+        logger.info("VALIDATION COMPLETE")
+        logger.info("="*60)
+        
+        if total > 0:
+            rate = (bus_monitor / total) * 100
+            logger.info(f"Bus Monitor Errors: {bus_monitor} ({rate:.1f}%)")
+            logger.info(f"True Failures: {true_failure} ({100-rate:.1f}%)")
+        
+        logger.info(f"Total Errors Analyzed: {len(self.results)}")
+
 
 def main():
-    """Main execution function"""
-    parser = argparse.ArgumentParser(
-        description='Learn message patterns from Excel TRUE results and CSV logs'
-    )
-    parser.add_argument(
-        '--csv-folder',
-        required=True,
-        help='Folder containing CSV raw logs'
-    )
-    parser.add_argument(
-        '--excel-folder',
-        required=True,
-        help='Folder containing Excel validation reports'
-    )
-    parser.add_argument(
-        '--output',
-        default='enhanced_message_definitions.json',
-        help='Output file for message definitions'
-    )
-    parser.add_argument(
-        '--sample-size',
-        type=int,
-        help='Number of rows to sample per CSV file'
-    )
-    parser.add_argument(
-        '--verbose',
-        action='store_true',
-        help='Enable verbose logging'
-    )
+    """Main function - no arguments needed!"""
     
-    args = parser.parse_args()
+    print("\n" + "="*70)
+    print("BUS MONITOR VALIDATION SYSTEM")
+    print("="*70)
+    print(f"\nCSV Folder: {CSV_FOLDER}")
+    print(f"Excel Folder: {EXCEL_FOLDER}")
+    print(f"Output Files: {DEFINITIONS_FILE}, {VALIDATION_REPORT}\n")
     
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Step 1: Learn patterns (if needed)
+    if LEARN_FROM_DATA or not os.path.exists(DEFINITIONS_FILE):
+        print("\nStep 1: Learning message patterns...")
+        learner = MessagePatternLearner()
+        definitions_file = learner.learn()
+    else:
+        print(f"\nStep 1: Using existing definitions from {DEFINITIONS_FILE}")
+        definitions_file = DEFINITIONS_FILE
     
-    # Create learner
-    learner = EnhancedMessagePatternLearner(
-        csv_folder=args.csv_folder,
-        excel_folder=args.excel_folder,
-        output_file=args.output
-    )
+    # Step 2: Validate errors
+    print("\nStep 2: Validating bus monitor errors...")
+    validator = BusMonitorValidator(definitions_file)
+    validator.validate_all()
     
-    # Learn from all sources
-    logger.info("Starting enhanced pattern learning...")
-    learner.learn_from_all_sources(sample_size=args.sample_size)
-    
-    # Generate output
-    learner.generate_definition_file()
-    
-    logger.info("Enhanced learning complete!")
+    print("\n" + "="*70)
+    print("ALL PROCESSING COMPLETE!")
+    print("="*70)
+    print(f"\nCheck these files for results:")
+    print(f"  - {VALIDATION_REPORT}")
+    print(f"  - {SUMMARY_REPORT}")
+    print(f"  - {DEFINITIONS_FILE}")
+
 
 if __name__ == "__main__":
     main()
