@@ -918,7 +918,10 @@ class BusMonitorDashboard:
         # Add message summary table
         msg_table = self.create_message_summary_table()
         if msg_table:
-            html_content += msg_table.to_html(include_plotlyjs=False, div_id="msg_table")
+            if isinstance(msg_table, str):
+                html_content += msg_table
+            else:
+                html_content += msg_table.to_html(include_plotlyjs=False, div_id="msg_table")
         
         html_content += """
                 </div>
@@ -931,7 +934,10 @@ class BusMonitorDashboard:
         # Add flip details table
         flip_table = self.create_flip_details_table()
         if flip_table:
-            html_content += flip_table.to_html(include_plotlyjs=False, div_id="flip_table")
+            if isinstance(flip_table, str):
+                html_content += flip_table
+            else:
+                html_content += flip_table.to_html(include_plotlyjs=False, div_id="flip_table")
         
         html_content += """
                 </div>
@@ -944,7 +950,10 @@ class BusMonitorDashboard:
         # Add data changes table
         changes_table = self.create_data_changes_table()
         if changes_table:
-            html_content += changes_table.to_html(include_plotlyjs=False, div_id="changes_table")
+            if isinstance(changes_table, str):
+                html_content += changes_table
+            else:
+                html_content += changes_table.to_html(include_plotlyjs=False, div_id="changes_table")
         
         html_content += """
                 </div>
@@ -957,7 +966,10 @@ class BusMonitorDashboard:
         # Add complete flip data table
         complete_table = self.create_complete_flip_data_table()
         if complete_table:
-            html_content += complete_table.to_html(include_plotlyjs=False, div_id="complete_table")
+            if isinstance(complete_table, str):
+                html_content += complete_table
+            else:
+                html_content += complete_table.to_html(include_plotlyjs=False, div_id="complete_table")
         
         html_content += """
                 </div>
@@ -970,7 +982,10 @@ class BusMonitorDashboard:
         # Add header validation table
         header_table = self.create_header_validation_table()
         if header_table:
-            html_content += header_table.to_html(include_plotlyjs=False, div_id="header_table")
+            if isinstance(header_table, str):
+                html_content += header_table
+            else:
+                html_content += header_table.to_html(include_plotlyjs=False, div_id="header_table")
         else:
             html_content += "<p>No header validation issues found or no lookup table provided.</p>"
         
