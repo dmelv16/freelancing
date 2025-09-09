@@ -468,18 +468,39 @@ class EnhancedBusMonitorDashboard:
             self.df_flip_patterns = patterns
     
     def create_time_series_analysis(self):
-        """
-        Create time series data for trend analysis
-        """
-        if self.df_flips is not None and not self.df_flips.empty:
-            # Group flips by hour intervals
+            """
+            Create time series data for trend analysis across multiple time windows.
+            """
+            if self.df_flips is None or self.df_flips.empty:
+                return
+    
+            all_ts_data = []
+            windows = {
+                '30_seconds': 30,
+                '1_minute': 60,
+                '5_minutes': 300,
+                '10_minutes': 600
+            }
+    
             df_ts = self.df_flips.copy()
-            df_ts['hour'] = (df_ts['timestamp'] // 3600) * 3600  # Round to hour
-            
-            ts_data = df_ts.groupby(['station', 'hour']).size().reset_index(name='flips_in_hour')
-            ts_data['datetime'] = pd.to_datetime(ts_data['hour'], unit='s')
-            
-            self.df_time_series = ts_data
+    
+            for name, seconds in windows.items():
+                # Create time buckets for the current window size
+                df_ts['time_bucket'] = (df_ts['timestamp'] // seconds) * seconds
+                
+                # Group by station and the time bucket
+                ts_grouped = df_ts.groupby(['station', 'time_bucket']).size().reset_index(name='flip_count')
+                
+                # Add metadata for this window
+                ts_grouped['window_type'] = name
+                ts_grouped['window_seconds'] = seconds
+                ts_grouped['flips_per_minute'] = (ts_grouped['flip_count'] / seconds * 60).round(1)
+                ts_grouped['datetime'] = pd.to_datetime(ts_grouped['time_bucket'], unit='s')
+                
+                all_ts_data.append(ts_grouped)
+    
+            if all_ts_data:
+                self.df_time_series = pd.concat(all_ts_data, ignore_index=True)
     
     def run_analysis(self):
         """
@@ -948,129 +969,99 @@ class EnhancedBusMonitorDashboard:
         return csv_files
     
     def print_enhanced_summary(self):
-        """
-        Print enhanced analysis summary with hierarchical insights
-        """
-        print("\n" + "="*70)
-        print("ENHANCED BUS MONITOR ANALYSIS SUMMARY")
-        print("="*70)
-        
-        # Station Level Summary
-        if self.df_station_summary is not None and len(self.df_station_summary) > 0:
-            print("\nSTATION LEVEL ANALYSIS")
-            print("-"*40)
-            print(f"Total Stations Analyzed: {len(self.df_station_summary)}")
+            """
+            Print enhanced analysis summary with hierarchical insights
+            """
+            print("\n" + "="*70)
+            print("ENHANCED BUS MONITOR ANALYSIS SUMMARY")
+            print("="*70)
             
-            # Top 3 problem stations
-            top_3 = self.df_station_summary.nlargest(3, 'severity_score')
-            print("\nTop 3 Problem Stations (by severity):")
-            for idx, (_, row) in enumerate(top_3.iterrows(), 1):
-                print(f"  {idx}. {row['station']}")
-                print(f"     - Severity Score: {row['severity_score']:.2f}")
-                print(f"     - Total Flips: {row['total_flips']}")
-                print(f"     - Flip Rate: {row['flip_rate_per_1000']:.2f} per 1000 messages")
-                print(f"     - Files: {row['file_count']}, Saves: {row['save_count']}")
-        
-        # Save Level Summary
-        if self.df_save_summary is not None and len(self.df_save_summary) > 0:
-            print("\nSAVE LEVEL ANALYSIS")
-            print("-"*40)
-            print(f"Total Station-Save Combinations: {len(self.df_save_summary)}")
+            # Station Level Summary
+            if self.df_station_summary is not None and not self.df_station_summary.empty:
+                print("\nSTATION LEVEL ANALYSIS")
+                print("-"*40)
+                print(f"Total Stations Analyzed: {len(self.df_station_summary)}")
+                
+                # Top 3 problem stations
+                top_3 = self.df_station_summary.nlargest(3, 'severity_score')
+                print("\nTop 3 Problem Stations (by severity):")
+                for idx, (_, row) in enumerate(top_3.iterrows(), 1):
+                    print(f"  {idx}. {row['station']}")
+                    print(f"     - Severity Score: {row['severity_score']:.2f}")
+                    print(f"     - Total Flips: {row['total_flips']}")
+                    print(f"     - Flip Rate: {row['flip_rate_per_1000']:.2f} per 1000 messages")
+                    print(f"     - Files: {row['file_count']}, Saves: {row['save_count']}")
             
-            # Top 3 problem saves
-            top_3_saves = self.df_save_summary.nlargest(3, 'severity_score')
-            print("\nTop 3 Problem Saves:")
-            for idx, (_, row) in enumerate(top_3_saves.iterrows(), 1):
-                print(f"  {idx}. {row['station']} - {row['save']}")
-                print(f"     - Severity Score: {row['severity_score']:.2f}")
-                print(f"     - Total Flips: {row['total_flips']}")
-                print(f"     - Files: {row['file_count']}")
-        
-        # Message Type Analysis
-        if self.df_message_type_station is not None and len(self.df_message_type_station) > 0:
-            print("\nMESSAGE TYPE ANALYSIS")
-            print("-"*40)
-            top_msg_types = self.df_message_type_station.groupby('msg_type')['flip_count'].sum().nlargest(5)
-            print("Top 5 Message Types Causing Flips:")
-            for msg_type, count in top_msg_types.items():
-                print(f"  - {msg_type}: {count} flips")
-        
-        # Overall Statistics
-        print("\nOVERALL STATISTICS")
-        print("-"*40)
-        if self.df_summary is not None:
-            print(f"Total Files Processed: {len(self.df_summary)}")
-            print(f"Total Rows Analyzed: {self.df_summary['total_rows'].sum():,}")
-        
-        if self.df_flips is not None and len(self.df_flips) > 0:
-            print(f"Total Bus Flips Detected: {len(self.df_flips)}")
+            # Save Level Summary
+            if self.df_save_summary is not None and not self.df_save_summary.empty:
+                print("\nSAVE LEVEL ANALYSIS")
+                print("-"*40)
+                print(f"Total Station-Save Combinations: {len(self.df_save_summary)}")
+                
+                # Top 3 problem saves
+                top_3_saves = self.df_save_summary.nlargest(3, 'severity_score')
+                print("\nTop 3 Problem Saves:")
+                for idx, (_, row) in enumerate(top_3_saves.iterrows(), 1):
+                    print(f"  {idx}. {row['station']} - {row['save']}")
+                    print(f"     - Severity Score: {row['severity_score']:.2f}")
+                    print(f"     - Total Flips: {row['total_flips']}")
+                    print(f"     - Files: {row['file_count']}")
             
-            # Time span analysis
-            time_span = self.df_flips['timestamp'].max() - self.df_flips['timestamp'].min()
-            print(f"Test Duration: {time_span:.1f} seconds ({time_span/60:.1f} minutes)")
+            # Message Type Analysis
+            if self.df_message_type_station is not None and not self.df_message_type_station.empty:
+                print("\nMESSAGE TYPE ANALYSIS")
+                print("-"*40)
+                top_msg_types = self.df_message_type_station.groupby('msg_type')['flip_count'].sum().nlargest(5)
+                print("Top 5 Message Types Causing Flips:")
+                for msg_type, count in top_msg_types.items():
+                    print(f"  - {msg_type}: {count} flips")
             
-            # Calculate flip rates at different time scales
-            if time_span > 0:
-                print("\nFlip Rates at Different Time Scales:")
-                print(f"  - Per Second: {len(self.df_flips)/time_span:.2f} flips/sec")
-                print(f"  - Per 30 Seconds: {len(self.df_flips)/time_span*30:.1f} flips/30sec")
-                print(f"  - Per Minute: {len(self.df_flips)/time_span*60:.1f} flips/min")
-                print(f"  - Per 5 Minutes: {len(self.df_flips)/time_span*300:.1f} flips/5min")
-                print(f"  - Per 10 Minutes: {len(self.df_flips)/time_span*600:.1f} flips/10min")
-        
-        if self.df_headers is not None:
-            print(f"\nHeader Validation Issues: {len(self.df_headers)}")
-        
-        if self.df_changes is not None:
-            print(f"Total Data Word Changes: {len(self.df_changes)}")
-        
-        # Time Series Analysis Summary
-        if self.df_time_series is not None and len(self.df_time_series) > 0:
-            print("\nTIME-BASED ANALYSIS")
+            # Overall Statistics
+            print("\nOVERALL STATISTICS")
             print("-"*40)
+            if self.df_summary is not None:
+                print(f"Total Files Processed: {len(self.df_summary)}")
+                print(f"Total Rows Analyzed: {self.df_summary['total_rows'].sum():,}")
             
-            # Find peak activity periods for each time window
-            for window_type in ['30_seconds', '1_minute', '5_minutes']:
-                df_window = self.df_time_series[self.df_time_series['window_type'] == window_type]
-                if len(df_window) > 0:
-                    peak = df_window.nlargest(1, 'flip_count').iloc[0]
-                    print(f"\nPeak {window_type.replace('_', ' ')}:")
-                    print(f"  - Station: {peak['station']}")
-                    print(f"  - Time: {peak['datetime']}")
-                    print(f"  - Flips: {peak['flip_count']}")
-                    print(f"  - Rate: {peak['flips_per_minute']:.1f} flips/min")
-        
-        # Anomaly Summary
-        anomalies = self.identify_anomalies()
-        if anomalies is not None and len(anomalies) > 0:
-            print("\nANOMALY DETECTION")
-            print("-"*40)
-            severity_counts = anomalies['severity'].value_counts()
-            for severity in ['Critical', 'High', 'Medium']:
-                if severity in severity_counts.index:
-                    print(f"{severity}: {severity_counts[severity]} anomalies")
+            if self.df_flips is not None and not self.df_flips.empty:
+                print(f"Total Bus Flips Detected: {len(self.df_flips)}")
+                
+                # Time span analysis
+                time_span = self.df_flips['timestamp'].max() - self.df_flips['timestamp'].min()
+                print(f"Test Duration: {time_span:.1f} seconds ({time_span/60:.1f} minutes)")
+                
+                # Calculate flip rates at different time scales
+                if time_span > 0:
+                    print("\nFlip Rates at Different Time Scales:")
+                    print(f"  - Per Second: {len(self.df_flips)/time_span:.2f} flips/sec")
+                    print(f"  - Per 30 Seconds: {len(self.df_flips)/time_span*30:.1f} flips/30sec")
+                    print(f"  - Per Minute: {len(self.df_flips)/time_span*60:.1f} flips/min")
+                    print(f"  - Per 5 Minutes: {len(self.df_flips)/time_span*300:.1f} flips/5min")
+                    print(f"  - Per 10 Minutes: {len(self.df_flips)/time_span*600:.1f} flips/10min")
             
-            # Show top critical anomalies
-            critical = anomalies[anomalies['severity'] == 'Critical']
-            if len(critical) > 0:
-                print("\nCritical Issues:")
-                for _, anomaly in critical.head(3).iterrows():
-                    print(f"  - {anomaly['type']} at {anomaly['location']}")
-                    print(f"    {anomaly['description']}")
-        
-        # Consecutive Flip Analysis
-        consecutive = self.analyze_consecutive_flips()
-        if consecutive is not None and len(consecutive) > 0:
-            print("\nRAPID FLIP SEQUENCES")
-            print("-"*40)
-            worst_sequence = consecutive.iloc[0]
-            print(f"Worst Case: {worst_sequence['consecutive_flips']} consecutive flips")
-            print(f"  Location: {worst_sequence['station']}_{worst_sequence['save']}")
-            print(f"  Duration: {worst_sequence['duration_seconds']:.1f} seconds")
-            print(f"  Rate: {worst_sequence['flip_rate_per_second']:.1f} flips/second")
-        
-        print("\n" + "="*70)
-
+            if self.df_headers is not None:
+                print(f"\nHeader Validation Issues: {len(self.df_headers)}")
+            
+            if self.df_changes is not None:
+                print(f"Total Data Word Changes: {len(self.df_changes)}")
+            
+            # Time Series Analysis Summary
+            if self.df_time_series is not None and not self.df_time_series.empty:
+                print("\nTIME-BASED ANALYSIS (PEAK FLIP PERIODS)")
+                print("-"*40)
+                
+                # Find peak activity periods for each time window
+                for window_type in ['30_seconds', '1_minute', '5_minutes', '10_minutes']:
+                    df_window = self.df_time_series[self.df_time_series['window_type'] == window_type]
+                    if not df_window.empty:
+                        peak = df_window.nlargest(1, 'flip_count').iloc[0]
+                        print(f"\nPeak {window_type.replace('_', ' ')}:")
+                        print(f"  - Station: {peak['station']}")
+                        print(f"  - Time: {peak['datetime'].strftime('%Y-%m-%d %H:%M:%S')}")
+                        print(f"  - Flips in window: {peak['flip_count']}")
+                        print(f"  - Rate: {peak['flips_per_minute']:.1f} flips/min")
+            
+            print("\n" + "="*70)
 
 def main():
     """
