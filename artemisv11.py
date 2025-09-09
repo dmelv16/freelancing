@@ -1009,15 +1009,65 @@ class EnhancedBusMonitorDashboard:
             time_span = self.df_flips['timestamp'].max() - self.df_flips['timestamp'].min()
             print(f"Test Duration: {time_span:.1f} seconds ({time_span/60:.1f} minutes)")
             
-            # Calculate flip distribution
+            # Calculate flip rates at different time scales
             if time_span > 0:
-                print(f"Average Flip Rate: {len(self.df_flips)/time_span*60:.2f} flips/minute")
+                print("\nFlip Rates at Different Time Scales:")
+                print(f"  - Per Second: {len(self.df_flips)/time_span:.2f} flips/sec")
+                print(f"  - Per 30 Seconds: {len(self.df_flips)/time_span*30:.1f} flips/30sec")
+                print(f"  - Per Minute: {len(self.df_flips)/time_span*60:.1f} flips/min")
+                print(f"  - Per 5 Minutes: {len(self.df_flips)/time_span*300:.1f} flips/5min")
+                print(f"  - Per 10 Minutes: {len(self.df_flips)/time_span*600:.1f} flips/10min")
         
         if self.df_headers is not None:
-            print(f"Header Validation Issues: {len(self.df_headers)}")
+            print(f"\nHeader Validation Issues: {len(self.df_headers)}")
         
         if self.df_changes is not None:
             print(f"Total Data Word Changes: {len(self.df_changes)}")
+        
+        # Time Series Analysis Summary
+        if self.df_time_series is not None and len(self.df_time_series) > 0:
+            print("\nTIME-BASED ANALYSIS")
+            print("-"*40)
+            
+            # Find peak activity periods for each time window
+            for window_type in ['30_seconds', '1_minute', '5_minutes']:
+                df_window = self.df_time_series[self.df_time_series['window_type'] == window_type]
+                if len(df_window) > 0:
+                    peak = df_window.nlargest(1, 'flip_count').iloc[0]
+                    print(f"\nPeak {window_type.replace('_', ' ')}:")
+                    print(f"  - Station: {peak['station']}")
+                    print(f"  - Time: {peak['datetime']}")
+                    print(f"  - Flips: {peak['flip_count']}")
+                    print(f"  - Rate: {peak['flips_per_minute']:.1f} flips/min")
+        
+        # Anomaly Summary
+        anomalies = self.identify_anomalies()
+        if anomalies is not None and len(anomalies) > 0:
+            print("\nANOMALY DETECTION")
+            print("-"*40)
+            severity_counts = anomalies['severity'].value_counts()
+            for severity in ['Critical', 'High', 'Medium']:
+                if severity in severity_counts.index:
+                    print(f"{severity}: {severity_counts[severity]} anomalies")
+            
+            # Show top critical anomalies
+            critical = anomalies[anomalies['severity'] == 'Critical']
+            if len(critical) > 0:
+                print("\nCritical Issues:")
+                for _, anomaly in critical.head(3).iterrows():
+                    print(f"  - {anomaly['type']} at {anomaly['location']}")
+                    print(f"    {anomaly['description']}")
+        
+        # Consecutive Flip Analysis
+        consecutive = self.analyze_consecutive_flips()
+        if consecutive is not None and len(consecutive) > 0:
+            print("\nRAPID FLIP SEQUENCES")
+            print("-"*40)
+            worst_sequence = consecutive.iloc[0]
+            print(f"Worst Case: {worst_sequence['consecutive_flips']} consecutive flips")
+            print(f"  Location: {worst_sequence['station']}_{worst_sequence['save']}")
+            print(f"  Duration: {worst_sequence['duration_seconds']:.1f} seconds")
+            print(f"  Rate: {worst_sequence['flip_rate_per_second']:.1f} flips/second")
         
         print("\n" + "="*70)
 
