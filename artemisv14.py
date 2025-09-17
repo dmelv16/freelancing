@@ -1064,24 +1064,22 @@ class StreamlinedBusMonitorDashboard:
                 return /^\\d+T/.test(msgStr);  // Match patterns like 19T, 27T, etc.
             }}).length;
             
-            const otherCount = filteredData.length - rCount - tCount;
-            
-            // Pie chart for R vs T distribution
+            // Bar chart for R vs T distribution
             Plotly.newPlot('rtChart', [{{
-                values: [rCount, tCount, otherCount],
-                labels: ['R Messages', 'T Messages', 'Other'],
-                type: 'pie',
+                x: ['R Messages', 'T Messages'],
+                y: [rCount, tCount],
+                type: 'bar',
                 marker: {{
-                    colors: ['#4CAF50', '#2196F3', '#E0E0E0']
+                    color: ['#4CAF50', '#2196F3']
                 }},
-                textposition: 'inside',
-                textinfo: 'percent',
-                hovertemplate: '%{{label}}: %{{value}}<br>%{{percent}}<extra></extra>'
+                text: [rCount, tCount],
+                textposition: 'auto',
+                hovertemplate: '%{{x}}: %{{y}}<extra></extra>'
             }}], {{
-                margin: {{ t: 10, b: 10, l: 40, r: 40 }},
+                margin: {{ t: 10, b: 40, l: 60, r: 20 }},
                 height: 350,
-                showlegend: true,
-                legend: {{ orientation: 'h', y: -0.1 }}
+                yaxis: {{ title: 'Count' }},
+                showlegend: false
             }});
             
             // Message Type Chart
