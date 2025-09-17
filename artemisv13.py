@@ -234,26 +234,40 @@ class StreamlinedBusMonitorDashboard:
                 })
         
         # Check each requirement against bus flips
+        # Use a set to track unique combinations and avoid duplicates
+        seen_combinations = set()
         affected_requirements = []
+        
         for req in requirements_data:
-            # Check each message type this requirement tests
-            for msg_type in req['msg_types_tested']:
+            # Get unique message types for this requirement
+            unique_msg_types = list(set(req['msg_types_tested']))
+            
+            # Check each unique message type this requirement tests
+            for msg_type in unique_msg_types:
                 key = (req['unit_id'], req['station'], req['save'], msg_type)
                 
                 if key in flip_lookup:
-                    # This requirement has bus flips for a message type it tests
-                    flips_info = flip_lookup[key]
+                    # Create a unique identifier for this combination
+                    combo_key = (req['requirement_name'], req['unit_id'], req['station'], 
+                                 req['save'], msg_type)
                     
-                    affected_requirements.append({
-                        'requirement_name': req['requirement_name'],
-                        'unit_id': req['unit_id'],
-                        'station': req['station'],
-                        'save': req['save'],
-                        'ofp': req['ofp'],
-                        'msg_type_affected': msg_type,
-                        'flip_count': len(flips_info),
-                        'bus_transitions': ', '.join(sorted(set([f['bus_transition'] for f in flips_info])))
-                    })
+                    # Only add if we haven't seen this combination before
+                    if combo_key not in seen_combinations:
+                        seen_combinations.add(combo_key)
+                        
+                        # This requirement has bus flips for a message type it tests
+                        flips_info = flip_lookup[key]
+                        
+                        affected_requirements.append({
+                            'requirement_name': req['requirement_name'],
+                            'unit_id': req['unit_id'],
+                            'station': req['station'],
+                            'save': req['save'],
+                            'ofp': req['ofp'],
+                            'msg_type_affected': msg_type,
+                            'flip_count': len(flips_info),
+                            'bus_transitions': ', '.join(sorted(set([f['bus_transition'] for f in flips_info])))
+                        })
         
         # Create DataFrames
         if affected_requirements:
@@ -278,7 +292,7 @@ class StreamlinedBusMonitorDashboard:
             self.df_requirements_summary = req_summary
             
             print(f"\nRequirements Analysis Complete:")
-            print(f"  Total affected requirements: {len(affected_requirements)}")
+            print(f"  Total affected requirement entries: {len(affected_requirements)}")
             print(f"  Unique requirements with issues: {len(self.df_requirements_summary)}")
     
     def detect_bus_flips(self, df: pd.DataFrame, file_info: dict):
@@ -659,9 +673,11 @@ class StreamlinedBusMonitorDashboard:
         other_messages = 0
         if self.df_flips is not None and not self.df_flips.empty:
             for msg_type in self.df_flips['msg_type'].dropna():
-                if str(msg_type).upper().startswith('R'):
+                msg_str = str(msg_type).strip()
+                # Extract pattern like 19R, 27T, etc.
+                if re.match(r'^\d+R', msg_str):
                     r_messages += 1
-                elif str(msg_type).upper().startswith('T'):
+                elif re.match(r'^\d+T', msg_str):
                     t_messages += 1
                 else:
                     other_messages += 1
@@ -1036,9 +1052,24 @@ class StreamlinedBusMonitorDashboard:
             }});
             
             // R vs T Message Chart
-            const rCount = filteredData.filter(d => d.msg_type && d.msg_type.toString().toUpperCase().startsWith('R')).length;
-            const tCount = filteredData.filter(d => d.msg_type && d.msg_type.toString().toUpperCase().startsWith('T')).length;
-            const otherCount = filteredData.filter(d => d.msg_type && !d.msg_type.toString().toUpperCase().startsWith('R') && !d.msg_type.toString().toUpperCase().startsWith('T')).length;
+            const rCount = filteredData.filter(d => {
+                if (!d.msg_type) return false;
+                const msgStr = d.msg_type.toString().trim();
+                return /^\d+R/.test(msgStr);  // Match patterns like 19R, 27R, etc.
+            }).length;
+            
+            const tCount = filteredData.filter(d => {
+                if (!d.msg_type) return false;
+                const msgStr = d.msg_type.toString().trim();
+                return /^\d+T/.test(msgStr);  // Match patterns like 19T, 27T, etc.
+            }).length;
+            
+            const otherCount = filteredData.filter(d => {
+                if (!d.msg_type) return false;
+                const msgStr = d.msg_type.toString().trim();
+                return !/^\d+[RT]/.test(msgStr);  // Doesn't match R or T pattern
+            }).length;
+            
             const nullCount = filteredData.filter(d => !d.msg_type).length;
             
             // Pie chart for R vs T distribution
