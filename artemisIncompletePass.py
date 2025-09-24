@@ -351,12 +351,18 @@ class StreamlinedBusMonitorDashboard:
             for pattern, count in pattern_counts.head(3).items():
                 top_patterns.append(f"{pattern} ({count}x)")
             
+            # Calculate percentage of total issues for this combination
+            issue_percentage = (len(group) / len(df_issues)) * 100 if len(df_issues) > 0 else 0
+            
             analysis_results.append({
                 'msg_type': msg_type,
                 'data_word': data_word,
                 'total_issues': len(group),
+                'issue_percentage': round(issue_percentage, 2),
                 'unique_patterns': len(pattern_counts),
                 'top_error_patterns': ' | '.join(top_patterns),
+                'most_common_error': pattern_counts.index[0] if len(pattern_counts) > 0 else 'N/A',
+                'most_common_count': pattern_counts.iloc[0] if len(pattern_counts) > 0 else 0,
                 'affected_units': group['unit_id'].nunique(),
                 'affected_stations': group['station'].nunique(),
                 'affected_saves': group['save'].nunique()
@@ -828,12 +834,19 @@ class StreamlinedBusMonitorDashboard:
     
     def create_interactive_dashboard(self):
         """Create an interactive HTML dashboard with filters"""
+        import json
+        
         dashboard_path = self.output_folder / "dashboard.html"
         
         # Prepare data for JavaScript
         flips_data = []
         if self.df_flips is not None and not self.df_flips.empty:
-            flips_data = self.df_flips.to_dict('records')
+            # Convert timestamps to strings to avoid JSON serialization issues
+            df_temp = self.df_flips.copy()
+            for col in ['timestamp_busA', 'timestamp_busB']:
+                if col in df_temp.columns:
+                    df_temp[col] = df_temp[col].astype(str)
+            flips_data = df_temp.to_dict('records')
         
         # Get unique values for filters
         unit_ids = sorted(self.df_flips['unit_id'].unique().tolist()) if self.df_flips is not None else []
@@ -872,6 +885,14 @@ class StreamlinedBusMonitorDashboard:
         data_word_data = []
         if self.df_data_word_analysis is not None and not self.df_data_word_analysis.empty:
             data_word_data = self.df_data_word_analysis.head(20).to_dict('records')
+        
+        # Convert to JSON for JavaScript
+        flips_data_json = json.dumps(flips_data)
+        data_word_data_json = json.dumps(data_word_data)
+        unit_ids_json = json.dumps(unit_ids)
+        stations_json = json.dumps(stations)
+        saves_json = json.dumps(saves)
+        msg_types_json = json.dumps(msg_types)
         
         html_content = f"""
 <!DOCTYPE html>
@@ -1095,20 +1116,98 @@ class StreamlinedBusMonitorDashboard:
         </div>
         
         <div class="chart-container">
-            <div class="chart-title">Top Data Word Issues</div>
+            <div class="chart-title">Data Word Analysis - Interactive Explorer</div>
+            <div style="margin-bottom: 15px; padding: 15px; background: #f0f7ff; border-left: 4px solid #2196F3; border-radius: 4px;">
+                <strong>Understanding Data Word Issues:</strong><br>
+                This analysis shows which data words (data01-data99) are experiencing bus flip errors.<br>
+                • <strong>Message Type</strong>: The type of message where errors occur (e.g., 19R, 27T)<br>
+                • <strong>Data Word</strong>: The specific data column that changed during bus flip<br>
+                • <strong>Error Pattern</strong>: Shows value transitions (e.g., "0x1234 -> 0x5678" means value changed from 0x1234 to 0x5678)<br>
+                • <strong>Frequency</strong>: How often each specific error pattern occurs
+            </div>
+            
+            <!-- Data Word Filters -->
+            <div style="background: #f9f9f9; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <h4 style="margin-top: 0;">Data Word Analysis Filters</h4>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: bold;">Message Type Filter:</label>
+                        <select id="dwMsgTypeFilter" onchange="updateDataWordView()" style="width: 100%; padding: 8px;">
+                            <option value="">All Message Types</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: bold;">Data Word Filter:</label>
+                        <select id="dwDataWordFilter" onchange="updateDataWordView()" style="width: 100%; padding: 8px;">
+                            <option value="">All Data Words</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: bold;">Min Issues Threshold:</label>
+                        <input type="number" id="dwMinIssues" value="1" min="1" onchange="updateDataWordView()" 
+                               style="width: 100%; padding: 8px;">
+                    </div>
+                    <div>
+                        <label style="display: block; margin-bottom: 5px; font-weight: bold;">View Type:</label>
+                        <select id="dwViewType" onchange="updateDataWordView()" style="width: 100%; padding: 8px;">
+                            <option value="bar">Bar Chart</option>
+                            <option value="heatmap">Heatmap Matrix</option>
+                            <option value="sunburst">Hierarchical Sunburst</option>
+                            <option value="bubble">Bubble Chart</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="margin-top: 15px;">
+                    <button onclick="resetDataWordFilters()" style="background: #ff9800; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
+                        Reset Filters
+                    </button>
+                    <button onclick="exportDataWordAnalysis()" style="background: #4CAF50; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-left: 10px;">
+                        Export Current View
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Main visualization container -->
             <div id="dataWordChart"></div>
-            <table class="data-word-table" id="dataWordTable">
-                <thead>
-                    <tr>
-                        <th>Message Type</th>
-                        <th>Data Word</th>
-                        <th>Issues</th>
-                        <th>Top Error Patterns</th>
-                    </tr>
-                </thead>
-                <tbody id="dataWordTableBody">
-                </tbody>
-            </table>
+            
+            <!-- Detailed pattern view -->
+            <div id="patternDetails" style="display: none; margin-top: 20px; padding: 15px; background: #fffbf0; border-left: 4px solid #ff9800; border-radius: 4px;">
+                <h4 style="margin-top: 0;">Error Pattern Details</h4>
+                <div id="patternDetailsContent"></div>
+            </div>
+            
+            <!-- Enhanced table with sorting -->
+            <div style="margin-top: 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h4 style="margin: 0;">Detailed Data Word Issues Table</h4>
+                    <div>
+                        <label>Sort by: </label>
+                        <select id="dwTableSort" onchange="sortDataWordTable()">
+                            <option value="issues">Total Issues</option>
+                            <option value="percentage">% of All Issues</option>
+                            <option value="patterns">Unique Patterns</option>
+                            <option value="units">Affected Units</option>
+                        </select>
+                    </div>
+                </div>
+                <table class="data-word-table" id="dataWordTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortDataWordTable('msg_type')" style="cursor: pointer;">Message Type ↕</th>
+                            <th onclick="sortDataWordTable('data_word')" style="cursor: pointer;">Data Word ↕</th>
+                            <th onclick="sortDataWordTable('total_issues')" style="cursor: pointer;">Total Issues ↕</th>
+                            <th onclick="sortDataWordTable('issue_percentage')" style="cursor: pointer;">% of All ↕</th>
+                            <th onclick="sortDataWordTable('unique_patterns')" style="cursor: pointer;">Patterns ↕</th>
+                            <th>Most Common Error</th>
+                            <th onclick="sortDataWordTable('affected_units')" style="cursor: pointer;">Units ↕</th>
+                            <th>Top Error Patterns</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dataWordTableBody">
+                    </tbody>
+                </table>
+            </div>
         </div>
         
         <div class="chart-container">
@@ -1119,15 +1218,15 @@ class StreamlinedBusMonitorDashboard:
     
     <script>
         // Data from Python
-        const allData = {flips_data};
-        const dataWordData = {data_word_data};
+        const allData = {flips_data_json};
+        const dataWordData = {data_word_data_json};
         let filteredData = [...allData];
         
         // Unique values for filters
-        const uniqueUnits = {unit_ids};
-        const uniqueStations = {stations};
-        const uniqueSaves = {saves};
-        const uniqueMsgTypes = {msg_types};
+        const uniqueUnits = {unit_ids_json};
+        const uniqueStations = {stations_json};
+        const uniqueSaves = {saves_json};
+        const uniqueMsgTypes = {msg_types_json};
         
         // Initialize filters
         function initializeFilters() {{
@@ -1346,97 +1445,345 @@ class StreamlinedBusMonitorDashboard:
                 yaxis: {{ title: 'Number of Flips' }}
             }});
             
-            // Data Word Chart
-            if (dataWordData.length > 0) {{
-                Plotly.newPlot('dataWordChart', [{{
-                    x: dataWordData.map(d => `${{d.msg_type}}-${{d.data_word}}`),
-                    y: dataWordData.map(d => d.total_issues),
-                    type: 'bar',
-                    marker: {{ color: '#e91e63' }}
-                }}], {{
-                    margin: {{ t: 10, b: 120, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Message Type - Data Word', tickangle: -45 }},
-                    yaxis: {{ title: 'Number of Issues' }}
-                }});
-                
-                // Populate data word table
-                const tableBody = document.getElementById('dataWordTableBody');
-                tableBody.innerHTML = '';
-                dataWordData.forEach(d => {{
-                    const row = tableBody.insertRow();
-                    row.insertCell(0).textContent = d.msg_type || 'N/A';
-                    row.insertCell(1).textContent = d.data_word;
-                    row.insertCell(2).textContent = d.total_issues;
-                    row.insertCell(3).textContent = d.top_error_patterns || 'N/A';
-                }});
+            // Data Word Chart - Initial load
+            drawDataWordChart();
+        }}
+        
+        // Data Word Analysis Functions
+        let currentDataWordView = 'bar';
+        let filteredDataWordData = [...dataWordData];
+        
+        function initializeDataWordFilters() {{
+            // Initialize message type filter
+            const msgTypes = [...new Set(dataWordData.map(d => d.msg_type))].filter(Boolean).sort();
+            const msgTypeFilter = document.getElementById('dwMsgTypeFilter');
+            msgTypes.forEach(type => {{
+                const option = document.createElement('option');
+                option.value = type;
+                option.textContent = type;
+                msgTypeFilter.appendChild(option);
+            }});
+            
+            // Initialize data word filter
+            const dataWords = [...new Set(dataWordData.map(d => d.data_word))].filter(Boolean).sort();
+            const dataWordFilter = document.getElementById('dwDataWordFilter');
+            dataWords.forEach(word => {{
+                const option = document.createElement('option');
+                option.value = word;
+                option.textContent = word;
+                dataWordFilter.appendChild(option);
+            }});
+        }}
+        
+        function updateDataWordView() {{
+            const msgTypeFilter = document.getElementById('dwMsgTypeFilter').value;
+            const dataWordFilter = document.getElementById('dwDataWordFilter').value;
+            const minIssues = parseInt(document.getElementById('dwMinIssues').value) || 1;
+            const viewType = document.getElementById('dwViewType').value;
+            
+            // Filter data
+            filteredDataWordData = dataWordData.filter(d => {{
+                return (!msgTypeFilter || d.msg_type === msgTypeFilter) &&
+                       (!dataWordFilter || d.data_word === dataWordFilter) &&
+                       (d.total_issues >= minIssues);
+            }});
+            
+            // Update visualization based on view type
+            currentDataWordView = viewType;
+            drawDataWordChart();
+            updateDataWordTable();
+        }}
+        
+        function drawDataWordChart() {{
+            const container = document.getElementById('dataWordChart');
+            
+            if (filteredDataWordData.length === 0) {{
+                container.innerHTML = '<div style="text-align: center; padding: 40px;">No data matching filters</div>';
+                return;
             }}
             
-            // Hierarchical Chart (Sunburst)
-            const hierarchicalData = [];
-            const labels = [];
-            const parents = [];
-            const values = [];
-            const colors = [];
+            switch(currentDataWordView) {{
+                case 'heatmap':
+                    drawDataWordHeatmap();
+                    break;
+                case 'sunburst':
+                    drawDataWordSunburst();
+                    break;
+                case 'bubble':
+                    drawDataWordBubble();
+                    break;
+                default:
+                    drawDataWordBar();
+            }}
+        }}
+        
+        function drawDataWordBar() {{
+            Plotly.newPlot('dataWordChart', [{{
+                x: filteredDataWordData.map(d => `${{d.msg_type}}-${{d.data_word}}`),
+                y: filteredDataWordData.map(d => d.total_issues),
+                type: 'bar',
+                marker: {{ 
+                    color: filteredDataWordData.map(d => d.total_issues),
+                    colorscale: 'Viridis',
+                    showscale: true,
+                    colorbar: {{
+                        title: 'Issues'
+                    }}
+                }},
+                text: filteredDataWordData.map(d => `${{d.issue_percentage || 0}}% of total<br>${{d.unique_patterns}} patterns`),
+                hovertemplate: 'Msg-Data: %{{x}}<br>Issues: %{{y}}<br>%{{text}}<extra></extra>'
+            }}], {{
+                margin: {{ t: 10, b: 120, l: 60, r: 60 }},
+                xaxis: {{ title: 'Message Type - Data Word', tickangle: -45 }},
+                yaxis: {{ title: 'Number of Issues' }},
+                height: 400
+            }});
             
-            // Add root
-            labels.push('All');
-            parents.push('');
-            values.push(filteredData.length);
-            colors.push('#667eea');
+            // Add click handler
+            document.getElementById('dataWordChart').on('plotly_click', function(data) {{
+                const pointIndex = data.points[0].pointIndex;
+                showPatternDetails(filteredDataWordData[pointIndex]);
+            }});
+        }}
+        
+        function drawDataWordHeatmap() {{
+            // Create matrix data for heatmap
+            const msgTypes = [...new Set(filteredDataWordData.map(d => d.msg_type))].sort();
+            const dataWords = [...new Set(filteredDataWordData.map(d => d.data_word))].sort();
             
-            // Group by unit
-            const unitGroups = {{}};
-            filteredData.forEach(d => {{
-                if (!unitGroups[d.unit_id]) {{
-                    unitGroups[d.unit_id] = {{}};
+            const matrix = [];
+            const annotations = [];
+            
+            for (let i = 0; i < msgTypes.length; i++) {{
+                const row = [];
+                for (let j = 0; j < dataWords.length; j++) {{
+                    const item = filteredDataWordData.find(d => 
+                        d.msg_type === msgTypes[i] && d.data_word === dataWords[j]
+                    );
+                    const value = item ? item.total_issues : 0;
+                    row.push(value);
+                    
+                    if (value > 0) {{
+                        annotations.push({{
+                            x: dataWords[j],
+                            y: msgTypes[i],
+                            text: value.toString(),
+                            showarrow: false,
+                            font: {{ color: value > 50 ? 'white' : 'black', size: 10 }}
+                        }});
+                    }}
                 }}
-                if (!unitGroups[d.unit_id][d.station]) {{
-                    unitGroups[d.unit_id][d.station] = {{}};
+                matrix.push(row);
+            }}
+            
+            Plotly.newPlot('dataWordChart', [{{
+                z: matrix,
+                x: dataWords,
+                y: msgTypes,
+                type: 'heatmap',
+                colorscale: 'RdYlBu',
+                reversescale: true,
+                hovertemplate: 'Msg Type: %{{y}}<br>Data Word: %{{x}}<br>Issues: %{{z}}<extra></extra>'
+            }}], {{
+                margin: {{ t: 10, b: 100, l: 100, r: 20 }},
+                xaxis: {{ title: 'Data Word', tickangle: -45 }},
+                yaxis: {{ title: 'Message Type' }},
+                height: 500,
+                annotations: annotations
+            }});
+        }}
+        
+        function drawDataWordSunburst() {{
+            const labels = ['All Issues'];
+            const parents = [''];
+            const values = [filteredDataWordData.reduce((sum, d) => sum + d.total_issues, 0)];
+            const texts = ['Total'];
+            
+            // Group by message type first
+            const msgTypeGroups = {{}};
+            filteredDataWordData.forEach(d => {{
+                if (!msgTypeGroups[d.msg_type]) {{
+                    msgTypeGroups[d.msg_type] = [];
                 }}
-                if (!unitGroups[d.unit_id][d.station][d.save]) {{
-                    unitGroups[d.unit_id][d.station][d.save] = 0;
-                }}
-                unitGroups[d.unit_id][d.station][d.save]++;
+                msgTypeGroups[d.msg_type].push(d);
             }});
             
             // Build hierarchy
-            Object.keys(unitGroups).forEach(unit => {{
-                labels.push(unit);
-                parents.push('All');
-                values.push(Object.values(unitGroups[unit]).reduce((sum, stations) => 
-                    sum + Object.values(stations).reduce((s, v) => s + v, 0), 0));
-                colors.push('#764ba2');
+            Object.keys(msgTypeGroups).forEach(msgType => {{
+                const msgTotal = msgTypeGroups[msgType].reduce((sum, d) => sum + d.total_issues, 0);
+                labels.push(msgType);
+                parents.push('All Issues');
+                values.push(msgTotal);
+                texts.push(`${{msgTotal}} issues`);
                 
-                Object.keys(unitGroups[unit]).forEach(station => {{
-                    const stationLabel = `${{unit}} - ${{station}}`;
-                    labels.push(stationLabel);
-                    parents.push(unit);
-                    values.push(Object.values(unitGroups[unit][station]).reduce((s, v) => s + v, 0));
-                    colors.push('#4CAF50');
-                    
-                    Object.keys(unitGroups[unit][station]).forEach(save => {{
-                        labels.push(`${{stationLabel}} - ${{save}}`);
-                        parents.push(stationLabel);
-                        values.push(unitGroups[unit][station][save]);
-                        colors.push('#ff9800');
-                    }});
+                msgTypeGroups[msgType].forEach(d => {{
+                    labels.push(`${{msgType}}-${{d.data_word}}`);
+                    parents.push(msgType);
+                    values.push(d.total_issues);
+                    texts.push(`${{d.data_word}}: ${{d.total_issues}}`);
                 }});
             }});
             
-            Plotly.newPlot('hierarchicalChart', [{{
+            Plotly.newPlot('dataWordChart', [{{
                 type: 'sunburst',
                 labels: labels,
                 parents: parents,
                 values: values,
-                marker: {{ colors: colors }}
+                text: texts,
+                hovertemplate: '%{{label}}<br>%{{text}}<br>%{{percentParent}}<extra></extra>',
+                marker: {{ colorscale: 'RdBu', reversescale: true }}
             }}], {{
                 margin: {{ t: 10, b: 10, l: 10, r: 10 }},
-                height: 600
+                height: 500
             }});
+        }}
+        
+        function drawDataWordBubble() {{
+            Plotly.newPlot('dataWordChart', [{{
+                x: filteredDataWordData.map(d => d.affected_units),
+                y: filteredDataWordData.map(d => d.unique_patterns),
+                mode: 'markers+text',
+                marker: {{
+                    size: filteredDataWordData.map(d => Math.sqrt(d.total_issues) * 5),
+                    color: filteredDataWordData.map(d => d.issue_percentage || 0),
+                    colorscale: 'Viridis',
+                    showscale: true,
+                    colorbar: {{
+                        title: '% of Issues'
+                    }}
+                }},
+                text: filteredDataWordData.map(d => `${{d.msg_type}}-${{d.data_word}}`),
+                textposition: 'middle center',
+                textfont: {{ size: 8 }},
+                hovertemplate: 'Msg-Data: %{{text}}<br>Affected Units: %{{x}}<br>Unique Patterns: %{{y}}<br>Total Issues: %{{marker.size}}<extra></extra>'
+            }}], {{
+                margin: {{ t: 10, b: 60, l: 60, r: 60 }},
+                xaxis: {{ title: 'Affected Units' }},
+                yaxis: {{ title: 'Unique Error Patterns' }},
+                height: 500
+            }});
+        }}
+        
+        function showPatternDetails(item) {{
+            const detailsDiv = document.getElementById('patternDetails');
+            const contentDiv = document.getElementById('patternDetailsContent');
+            
+            detailsDiv.style.display = 'block';
+            contentDiv.innerHTML = `
+                <h5>${{item.msg_type}} - ${{item.data_word}}</h5>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin: 15px 0;">
+                    <div><strong>Total Issues:</strong> ${{item.total_issues}}</div>
+                    <div><strong>% of All Issues:</strong> ${{item.issue_percentage || 0}}%</div>
+                    <div><strong>Unique Patterns:</strong> ${{item.unique_patterns}}</div>
+                    <div><strong>Affected Units:</strong> ${{item.affected_units}}</div>
+                    <div><strong>Affected Stations:</strong> ${{item.affected_stations}}</div>
+                    <div><strong>Affected Saves:</strong> ${{item.affected_saves}}</div>
+                </div>
+                <div><strong>Most Common Error:</strong> ${{item.most_common_error || 'N/A'}}</div>
+                <div style="margin-top: 10px;"><strong>All Error Patterns:</strong></div>
+                <div style="background: white; padding: 10px; border-radius: 4px; margin-top: 5px;">
+                    ${{item.top_error_patterns || 'N/A'}}
+                </div>
+            `;
+        }}
+        
+        function updateDataWordTable() {{
+            const tableBody = document.getElementById('dataWordTableBody');
+            tableBody.innerHTML = '';
+            
+            filteredDataWordData.forEach((d, index) => {{
+                const row = tableBody.insertRow();
+                row.insertCell(0).textContent = d.msg_type || 'N/A';
+                row.insertCell(1).textContent = d.data_word;
+                row.insertCell(2).textContent = d.total_issues;
+                row.insertCell(3).textContent = `${{d.issue_percentage || 0}}%`;
+                row.insertCell(4).textContent = d.unique_patterns || 0;
+                row.insertCell(5).textContent = d.most_common_error || 'N/A';
+                row.insertCell(6).textContent = d.affected_units || 0;
+                
+                const patternsCell = row.insertCell(7);
+                const patterns = d.top_error_patterns || 'N/A';
+                if (patterns.length > 60) {{
+                    patternsCell.textContent = patterns.substring(0, 60) + '...';
+                    patternsCell.title = patterns;
+                }} else {{
+                    patternsCell.textContent = patterns;
+                }}
+                
+                const actionsCell = row.insertCell(8);
+                actionsCell.innerHTML = `
+                    <button onclick="showPatternDetails(${{JSON.stringify(d).replace(/"/g, '&quot;')}})" 
+                            style="background: #2196F3; color: white; border: none; padding: 4px 8px; border-radius: 3px; cursor: pointer; font-size: 12px;">
+                        Details
+                    </button>
+                `;
+            }});
+        }}
+        
+        function sortDataWordTable(column) {{
+            const sortField = column || document.getElementById('dwTableSort').value;
+            
+            filteredDataWordData.sort((a, b) => {{
+                switch(sortField) {{
+                    case 'msg_type':
+                        return (a.msg_type || '').localeCompare(b.msg_type || '');
+                    case 'data_word':
+                        return (a.data_word || '').localeCompare(b.data_word || '');
+                    case 'total_issues':
+                    case 'issues':
+                        return b.total_issues - a.total_issues;
+                    case 'issue_percentage':
+                    case 'percentage':
+                        return (b.issue_percentage || 0) - (a.issue_percentage || 0);
+                    case 'unique_patterns':
+                    case 'patterns':
+                        return b.unique_patterns - a.unique_patterns;
+                    case 'affected_units':
+                    case 'units':
+                        return b.affected_units - a.affected_units;
+                    default:
+                        return 0;
+                }}
+            }});
+            
+            updateDataWordTable();
+        }}
+        
+        function resetDataWordFilters() {{
+            document.getElementById('dwMsgTypeFilter').value = '';
+            document.getElementById('dwDataWordFilter').value = '';
+            document.getElementById('dwMinIssues').value = '1';
+            document.getElementById('dwViewType').value = 'bar';
+            updateDataWordView();
+        }}
+        
+        function exportDataWordAnalysis() {{
+            const csvContent = [
+                ['Message Type', 'Data Word', 'Total Issues', '% of All', 'Unique Patterns', 'Most Common Error', 'Affected Units', 'Top Patterns'],
+                ...filteredDataWordData.map(d => [
+                    d.msg_type || 'N/A',
+                    d.data_word,
+                    d.total_issues,
+                    `${{d.issue_percentage || 0}}%`,
+                    d.unique_patterns || 0,
+                    d.most_common_error || 'N/A',
+                    d.affected_units || 0,
+                    d.top_error_patterns || 'N/A'
+                ])
+            ].map(row => row.map(cell => `"${{String(cell).replace(/"/g, '""')}}"`).join(',')).join('\\n');
+            
+            const blob = new Blob([csvContent], {{ type: 'text/csv' }});
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'data_word_analysis.csv';
+            a.click();
+            window.URL.revokeObjectURL(url);
         }}
         
         // Initialize on page load
         initializeFilters();
+        initializeDataWordFilters();
         drawCharts();
     </script>
 </body>
