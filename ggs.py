@@ -697,6 +697,58 @@ class PowerDataClusteringPipeline:
         
         print(f"Saved aircraft comparison plots")
     
+    def run_full_pipeline(self, custom_mappings: Dict = None):
+        """
+        Execute the complete clustering pipeline
+        
+        Args:
+            custom_mappings: Optional dictionary of test_case -> cluster -> business_state mappings
+                           e.g., {'TestA': {0: 'de_energized', 1: 'ramp_up', 2: 'steady_state'}}
+        """
+        
+        # Step 1: Load and prepare data
+        print("\n" + "="*60)
+        print("STEP 1: Loading and Preparing Data")
+        print("="*60)
+        self.load_and_prepare_data()
+        
+        # Step 2: Train models for each test case
+        print("\n" + "="*60)
+        print("STEP 2: Training Models")
+        print("="*60)
+        self.train_test_case_models()
+        
+        # Step 3: Apply custom mappings if provided
+        if custom_mappings:
+            print("\n" + "="*60)
+            print("STEP 3: Applying Custom Business Mappings")
+            print("="*60)
+            self.apply_custom_mappings(custom_mappings)
+        else:
+            print("\n" + "="*60)
+            print("STEP 3: Review Statistics to Create Mappings")
+            print("="*60)
+            self.create_manual_mapping_interface()
+        
+        # Step 4: Create multi-level summaries
+        print("\n" + "="*60)
+        print("STEP 4: Creating Multi-Level Summaries")
+        print("="*60)
+        self.create_multilevel_summary()
+        
+        # Step 5: Aircraft anomaly analysis
+        print("\n" + "="*60)
+        print("STEP 5: Aircraft Anomaly Detection")
+        print("="*60)
+        self.analyze_aircraft_anomalies()
+        
+        print("\n" + "="*60)
+        print("Pipeline Complete!")
+        print(f"Results saved to: {self.output_dir}")
+        print("="*60)
+        
+        return self.test_case_models
+    
     def predict_new_data(self, new_data_path: str, test_case: str) -> pd.DataFrame:
         """
         Use a trained model to predict on new data
