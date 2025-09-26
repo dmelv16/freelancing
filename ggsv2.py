@@ -1162,49 +1162,69 @@ class PowerDataClusteringPipeline:
     
     def create_multilevel_summary_hierarchical(self):
         """Create summaries for hierarchical models"""
+        
+        # Check if we have models
+        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+            print("No models found. Skipping multilevel summary.")
+            return
+            
         all_summaries = []
         
         for level in ['primary', 'test_case']:
-            for key, model_info in self.hierarchical_models[level].items():
-                data = model_info['data']
-                
-                if 'business_state' in data.columns:
-                    summary = data.groupby('business_state').agg({
-                        'cluster': 'count'
-                    }).rename(columns={'cluster': 'count'})
-                    summary['model'] = f"{level}_{key}"
-                    all_summaries.append(summary)
+            if level in self.hierarchical_models:
+                for key, model_info in self.hierarchical_models[level].items():
+                    data = model_info['data']
+                    
+                    if 'business_state' in data.columns:
+                        summary = data.groupby('business_state').agg({
+                            'cluster': 'count'
+                        }).rename(columns={'cluster': 'count'})
+                        summary['model'] = f"{level}_{key}"
+                        all_summaries.append(summary)
         
         if all_summaries:
             combined = pd.concat(all_summaries)
             summary_path = self.stats_dir / "hierarchical_model_summary.csv"
             combined.to_csv(summary_path)
+            print(f"Saved hierarchical model summary to {summary_path}")
+        else:
+            print("No summaries to save")
     
     def analyze_ofp_anomalies_hierarchical(self):
         """Analyze OFP anomalies using hierarchical models"""
+        
+        # Check if we have models to analyze
+        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+            print("No models found. Please train models first.")
+            return None
+            
         all_data = []
         
         for level in ['primary', 'test_case']:
-            for key, model_info in self.hierarchical_models[level].items():
-                data = model_info['data'].copy()
-                data['model_level'] = level
-                data['model_key'] = key
-                all_data.append(data)
+            if level in self.hierarchical_models:
+                for key, model_info in self.hierarchical_models[level].items():
+                    data = model_info['data'].copy()
+                    data['model_level'] = level
+                    data['model_key'] = key
+                    all_data.append(data)
         
-        if all_data:
-            combined_data = pd.concat(all_data, ignore_index=True)
+        if not all_data:
+            print("No data found in models")
+            return None
             
-            # Remove duplicates (same data point from different model levels)
-            if 'ofp' in combined_data.columns:
-                # Keep primary model predictions when available
-                dedup_cols = ['ofp', 'test_case', 'test_run'] if all(col in combined_data.columns for col in ['ofp', 'test_case', 'test_run']) else ['ofp']
-                combined_data = combined_data.sort_values('model_level').drop_duplicates(subset=dedup_cols)
-                
-                # Now run the anomaly analysis on deduplicated data
-                return self._perform_ofp_anomaly_analysis(combined_data)
-            else:
-                print("No 'ofp' column found in data")
-                return None
+        combined_data = pd.concat(all_data, ignore_index=True)
+        
+        # Remove duplicates (same data point from different model levels)
+        if 'ofp' in combined_data.columns:
+            # Keep primary model predictions when available
+            dedup_cols = ['ofp', 'test_case', 'test_run'] if all(col in combined_data.columns for col in ['ofp', 'test_case', 'test_run']) else ['ofp']
+            combined_data = combined_data.sort_values('model_level').drop_duplicates(subset=dedup_cols)
+            
+            # Now run the anomaly analysis on deduplicated data
+            return self._perform_ofp_anomaly_analysis(combined_data)
+        else:
+            print("No 'ofp' column found in data")
+            return None
     
     def _perform_ofp_anomaly_analysis(self, combined_data: pd.DataFrame):
         """Core OFP anomaly analysis logic"""
@@ -1279,13 +1299,18 @@ class PowerDataClusteringPipeline:
         print("Creating Full Grouping Cluster Visualizations")
         print("="*60)
         
+        # Check if we have models
+        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+            print("No models found. Please train models first.")
+            return None
+            
         # Get the full granularity grouping
         full_grouping_cols = [col for col in ['test_case', 'test_run', 'save', 'unit_id', 'station', 'ofp'] 
                              if col in self.df.columns]
         
         if not full_grouping_cols:
             print("No grouping columns found")
-            return
+            return None
         
         # Create a subdirectory for full grouping plots
         full_plots_dir = self.plots_dir / "full_groupings"
@@ -1478,6 +1503,10 @@ class PowerDataClusteringPipeline:
             if (idx + 1) % 10 == 0:
                 print(f"  Created {idx + 1}/{len(grouped)} plots...")
         
+        if not grouping_summary:
+            print("No plots were created. Check if models have been trained.")
+            return None
+            
         # Save summary CSV for reference
         summary_df = pd.DataFrame(grouping_summary)
         summary_path = full_plots_dir / "grouping_plot_index.csv"
