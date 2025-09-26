@@ -1,6 +1,7 @@
 """
 Power Data Clustering Pipeline using GreedyGaussianSegmenter
 Comprehensive analysis with multi-level grouping and visualization
+FIXED VERSION - Using hierarchical models consistently
 """
 
 import pandas as pd
@@ -42,7 +43,11 @@ class PowerDataClusteringPipeline:
             dir.mkdir(exist_ok=True)
         
         self.df = None
-        self.hierarchical_models = {}  # Single consistent model storage
+        self.hierarchical_models = {
+            'primary': {},
+            'fallback': {},
+            'test_case': {}
+        }
         self.cluster_mappings = {}
         self.model_assignments = {}
         
@@ -186,13 +191,6 @@ class PowerDataClusteringPipeline:
         
         # Create primary groups
         existing_primary = [col for col in primary_grouping if col in self.df.columns]
-        
-        # Store models at different levels
-        self.hierarchical_models = {
-            'primary': {},
-            'fallback': {},
-            'test_case': {}  # Always keep test_case level as ultimate fallback
-        }
         
         # Track which groups use which model
         self.model_assignments = {}
@@ -371,7 +369,7 @@ class PowerDataClusteringPipeline:
                 stats['std_slope'] = cluster_data[slope_col].std()
             
             # Temporal analysis
-            positions = cluster_data.index.values if isinstance(cluster_data.index.values[0], int) else np.arange(len(cluster_data))
+            positions = cluster_data.index.values if isinstance(cluster_data.index.values[0], (int, np.integer)) else np.arange(len(cluster_data))
             relative_positions = positions / len(data)
             stats['avg_position'] = np.mean(relative_positions)
             stats['first_occurrence'] = np.min(relative_positions)
@@ -417,8 +415,9 @@ class PowerDataClusteringPipeline:
         if voltage_col in data.columns:
             for cluster in sorted(data[cluster_col].unique()):
                 cluster_data = data[data[cluster_col] == cluster]
-                ax.scatter(range(len(cluster_data)), 
-                          cluster_data[voltage_col],
+                indices = np.arange(len(cluster_data))
+                ax.scatter(indices, 
+                          cluster_data[voltage_col].values,
                           label=f'Cluster {cluster}',
                           alpha=0.6, s=1)
             ax.set_xlabel('Time Index')
@@ -439,160 +438,47 @@ class PowerDataClusteringPipeline:
             ax.set_title(f'{dc_channel.upper()} Feature Space Clustering')
             plt.colorbar(scatter, ax=ax, label='Cluster')
         
-        # Continue with other plots...
-        # (Rest of visualization code similar to original but using appropriate DC columns)
+        # Plot 3: Cluster distribution
+        ax = axes[1, 0]
+        cluster_counts = data[cluster_col].value_counts()
+        ax.bar(cluster_counts.index, cluster_counts.values)
+        ax.set_xlabel('Cluster')
+        ax.set_ylabel('Count')
+        ax.set_title('Cluster Size Distribution')
+        
+        # Plot 4: DC1 vs DC2 comparison (if both exist)
+        ax = axes[1, 1]
+        if 'voltage_28v_dc1_cal' in data.columns and 'voltage_28v_dc2_cal' in data.columns:
+            scatter = ax.scatter(data['voltage_28v_dc1_cal'],
+                                data['voltage_28v_dc2_cal'],
+                                c=data[cluster_col],
+                                cmap='viridis',
+                                alpha=0.6)
+            ax.set_xlabel('Voltage DC1 (V)')
+            ax.set_ylabel('Voltage DC2 (V)')
+            ax.set_title('DC1 vs DC2 Voltage')
+            plt.colorbar(scatter, ax=ax, label='Cluster')
+        
+        # Plot 5: Temporal cluster sequence
+        ax = axes[2, 0]
+        ax.plot(data[cluster_col].values, linewidth=0.5)
+        ax.set_xlabel('Time Index')
+        ax.set_ylabel('Cluster ID')
+        ax.set_title('Cluster Sequence Over Time')
+        
+        # Plot 6: Feature importance heatmap
+        ax = axes[2, 1]
+        feature_cols = [col for col in self.get_feature_columns() if col in data.columns][:6]
+        if feature_cols:
+            cluster_means = data.groupby(cluster_col)[feature_cols].mean()
+            sns.heatmap(cluster_means.T, annot=True, fmt='.2f', ax=ax, cmap='coolwarm')
+            ax.set_title('Mean Feature Values by Cluster')
         
         plt.tight_layout()
         plt.savefig(self.plots_dir / f'{identifier}_analysis.png', dpi=100, bbox_inches='tight')
         plt.close()
         
         print(f"  Saved visualization for {identifier}")
-    
-    def _train_single_model(self, data: pd.DataFrame, identifier: str) -> Dict:
-        """
-        Train a single GreedyGaussianSegmenter model
-        
-        Returns:
-            Dictionary with model info or None if training fails
-        """
-        try:
-            # Get features
-            feature_cols = self.get_feature_columns()
-            features = data[feature_cols].values
-            
-            # Check if we have valid features
-            if features.shape[0] < 100:
-                print(f"  Skipping - insufficient data points: {features.shape[0]}")
-                return None
-            
-            # Standardize
-            scaler = StandardScaler()
-            features_scaled = scaler.fit_transform(features)
-            
-            # Train GreedyGaussianSegmenter
-            ggs = GreedyGaussianSegmenter(k_max=5, max_shuffles=1)
-            predicted_labels = ggs.fit_predict(features_scaled.T)
-            
-            # Add predictions to data
-            data_copy = data.copy()
-            data_copy['cluster'] = predicted_labels
-            
-            # Analyze clusters
-            cluster_mapping = self._analyze_clusters(data_copy, identifier)
-            
-            # Create visualizations
-            self._create_test_case_visualizations(data_copy, identifier)
-            
-            # Store model info
-            model_info = {
-                'model': ggs,
-                'scaler': scaler,
-                'features': feature_cols,
-                'data': data_copy,
-                'cluster_mapping': cluster_mapping,
-                'n_clusters': len(np.unique(predicted_labels)),
-                'n_points': len(data),
-                'identifier': identifier
-            }
-            
-            # Save model
-            model_path = self.models_dir / f"model_{identifier}.pkl"
-            with open(model_path, 'wb') as f:
-                pickle.dump(model_info, f)
-            
-            print(f"  Successfully trained model with {model_info['n_clusters']} clusters")
-            return model_info
-            
-        except Exception as e:
-            print(f"  Error training model for {identifier}: {str(e)}")
-            return None
-    
-    def _analyze_clusters(self, data: pd.DataFrame, test_case: str) -> Dict:
-        """
-        Analyze clusters and create detailed characterization WITHOUT business assumptions
-        """
-        print(f"\nAnalyzing clusters for {test_case}...")
-        
-        cluster_stats = []
-        feature_cols = self.get_feature_columns()
-        
-        for cluster in sorted(data['cluster'].unique()):
-            cluster_data = data[data['cluster'] == cluster]
-            
-            stats = {
-                'cluster': cluster,
-                'count': len(cluster_data),
-                'percentage': len(cluster_data) / len(data) * 100,
-            }
-            
-            # Calculate statistics for voltage columns
-            for dc in ['dc1', 'dc2']:
-                voltage_col = f'voltage_28v_{dc}_cal'
-                slope_col = f'slope_3_V_{dc}'
-                
-                if voltage_col in data.columns:
-                    stats[f'avg_voltage_{dc}'] = cluster_data[voltage_col].mean()
-                    stats[f'std_voltage_{dc}'] = cluster_data[voltage_col].std()
-                    stats[f'min_voltage_{dc}'] = cluster_data[voltage_col].min()
-                    stats[f'max_voltage_{dc}'] = cluster_data[voltage_col].max()
-                    stats[f'median_voltage_{dc}'] = cluster_data[voltage_col].median()
-                
-                if slope_col in data.columns:
-                    stats[f'avg_slope_{dc}'] = cluster_data[slope_col].mean()
-                    stats[f'std_slope_{dc}'] = cluster_data[slope_col].std()
-                    stats[f'max_slope_{dc}'] = cluster_data[slope_col].max()
-                    stats[f'min_slope_{dc}'] = cluster_data[slope_col].min()
-            
-            # Temporal position analysis - just for information, not for business logic
-            positions = cluster_data.index.values if isinstance(cluster_data.index.values[0], int) else np.arange(len(cluster_data))
-            relative_positions = positions / len(data)
-            stats['avg_position'] = np.mean(relative_positions)
-            stats['first_occurrence'] = np.min(relative_positions)
-            stats['last_occurrence'] = np.max(relative_positions)
-            stats['position_spread'] = np.std(relative_positions)
-            
-            # Continuity analysis - does this cluster appear in continuous blocks?
-            cluster_runs = (data['cluster'] == cluster).astype(int)
-            runs = cluster_runs.diff().ne(0).cumsum()
-            run_lengths = cluster_runs.groupby(runs).sum()
-            run_lengths = run_lengths[run_lengths > 0]
-            
-            stats['num_continuous_blocks'] = len(run_lengths)
-            stats['avg_block_length'] = run_lengths.mean()
-            stats['max_block_length'] = run_lengths.max()
-            
-            cluster_stats.append(stats)
-        
-        # Create DataFrame for easy viewing
-        stats_df = pd.DataFrame(cluster_stats)
-        
-        # Save detailed statistics
-        stats_path = self.stats_dir / f"cluster_stats_{test_case}.csv"
-        stats_df.to_csv(stats_path, index=False)
-        
-        print("\nCluster Statistics:")
-        print("-" * 100)
-        
-        # Print formatted statistics for better readability
-        for _, row in stats_df.iterrows():
-            print(f"\nCluster {row['cluster']}:")
-            print(f"  Size: {row['count']} points ({row['percentage']:.1f}%)")
-            print(f"  DC1 Voltage: {row.get('avg_voltage_dc1', 0):.1f}V ± {row.get('std_voltage_dc1', 0):.1f}V (range: {row.get('min_voltage_dc1', 0):.1f}-{row.get('max_voltage_dc1', 0):.1f}V)")
-            print(f"  DC1 Slope: {row.get('avg_slope_dc1', 0):.3f} ± {row.get('std_slope_dc1', 0):.3f}")
-            print(f"  Temporal: First at {row['first_occurrence']*100:.1f}%, Last at {row['last_occurrence']*100:.1f}%, Avg at {row['avg_position']*100:.1f}%")
-            print(f"  Continuity: {row['num_continuous_blocks']} blocks, avg length {row['avg_block_length']:.0f} points")
-        
-        # Create descriptive mapping (not business mapping)
-        mapping = self._create_physical_state_mapping(stats_df)
-        
-        print("\nCluster Descriptive Labels:")
-        for cluster, label in mapping.items():
-            print(f"  Cluster {cluster}: {label}")
-        
-        return {
-            'stats': stats_df,
-            'descriptive_mapping': mapping
-        }
     
     def _create_physical_state_mapping(self, stats_df: pd.DataFrame) -> Dict:
         """
@@ -605,10 +491,15 @@ class PowerDataClusteringPipeline:
         if 'avg_voltage_dc1' in stats_df.columns:
             voltage_col = 'avg_voltage_dc1'
             slope_col = 'avg_slope_dc1'
+        elif 'avg_voltage' in stats_df.columns:
+            voltage_col = 'avg_voltage'
+            slope_col = 'avg_slope'
         else:
-            # Fallback to dc2 or any available
-            voltage_col = stats_df.columns[stats_df.columns.str.contains('avg_voltage')][0] if any(stats_df.columns.str.contains('avg_voltage')) else None
-            slope_col = stats_df.columns[stats_df.columns.str.contains('avg_slope')][0] if any(stats_df.columns.str.contains('avg_slope')) else None
+            # Fallback to any available
+            voltage_cols = [c for c in stats_df.columns if 'voltage' in c.lower() and 'avg' in c.lower()]
+            slope_cols = [c for c in stats_df.columns if 'slope' in c.lower() and 'avg' in c.lower()]
+            voltage_col = voltage_cols[0] if voltage_cols else None
+            slope_col = slope_cols[0] if slope_cols else None
         
         if voltage_col and slope_col:
             for _, row in stats_df.iterrows():
@@ -654,81 +545,6 @@ class PowerDataClusteringPipeline:
         
         return mapping
     
-    def _create_test_case_visualizations(self, data: pd.DataFrame, test_case: str):
-        """Create comprehensive visualizations for each test case"""
-        
-        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
-        fig.suptitle(f'Test Case: {test_case} - Clustering Analysis', fontsize=16)
-        
-        # Plot 1: Time series with clusters
-        ax = axes[0, 0]
-        if 'voltage_28v_dc1_cal' in data.columns:
-            for cluster in sorted(data['cluster'].unique()):
-                cluster_data = data[data['cluster'] == cluster]
-                ax.scatter(range(len(cluster_data)), 
-                          cluster_data['voltage_28v_dc1_cal'],
-                          label=f'Cluster {cluster}',
-                          alpha=0.6, s=1)
-            ax.set_xlabel('Time Index')
-            ax.set_ylabel('Voltage DC1 (V)')
-            ax.set_title('Voltage Time Series by Cluster')
-            ax.legend()
-        
-        # Plot 2: Slope vs Voltage scatter
-        ax = axes[0, 1]
-        if 'voltage_28v_dc1_cal' in data.columns and 'slope_3_V_dc1' in data.columns:
-            scatter = ax.scatter(data['voltage_28v_dc1_cal'], 
-                                data['slope_3_V_dc1'],
-                                c=data['cluster'],
-                                cmap='viridis',
-                                alpha=0.6)
-            ax.set_xlabel('Voltage DC1 (V)')
-            ax.set_ylabel('Slope DC1 (V/sample)')
-            ax.set_title('Voltage vs Slope Clustering')
-            plt.colorbar(scatter, ax=ax, label='Cluster')
-        
-        # Plot 3: Cluster distribution over time
-        ax = axes[1, 0]
-        cluster_counts = data.groupby('cluster').size()
-        ax.bar(cluster_counts.index, cluster_counts.values)
-        ax.set_xlabel('Cluster')
-        ax.set_ylabel('Count')
-        ax.set_title('Cluster Size Distribution')
-        
-        # Plot 4: DC1 vs DC2 comparison (if both exist)
-        ax = axes[1, 1]
-        if 'voltage_28v_dc1_cal' in data.columns and 'voltage_28v_dc2_cal' in data.columns:
-            scatter = ax.scatter(data['voltage_28v_dc1_cal'],
-                                data['voltage_28v_dc2_cal'],
-                                c=data['cluster'],
-                                cmap='viridis',
-                                alpha=0.6)
-            ax.set_xlabel('Voltage DC1 (V)')
-            ax.set_ylabel('Voltage DC2 (V)')
-            ax.set_title('DC1 vs DC2 Voltage')
-            plt.colorbar(scatter, ax=ax, label='Cluster')
-        
-        # Plot 5: Temporal cluster sequence
-        ax = axes[2, 0]
-        ax.plot(data['cluster'].values, linewidth=0.5)
-        ax.set_xlabel('Time Index')
-        ax.set_ylabel('Cluster ID')
-        ax.set_title('Cluster Sequence Over Time')
-        
-        # Plot 6: Feature importance heatmap
-        ax = axes[2, 1]
-        feature_cols = [col for col in self.get_feature_columns() if col in data.columns][:6]  # Top 6 features
-        if feature_cols:
-            cluster_means = data.groupby('cluster')[feature_cols].mean()
-            sns.heatmap(cluster_means.T, annot=True, fmt='.2f', ax=ax, cmap='coolwarm')
-            ax.set_title('Mean Feature Values by Cluster')
-        
-        plt.tight_layout()
-        plt.savefig(self.plots_dir / f'test_case_{test_case}_analysis.png', dpi=100, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Saved visualization for {test_case}")
-    
     def create_manual_mapping_interface(self):
         """
         After reviewing cluster statistics, show interface for manual business state assignment
@@ -738,7 +554,7 @@ class PowerDataClusteringPipeline:
         print("Manual Cluster Mapping Interface")
         print("="*60)
         
-        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+        if not self.hierarchical_models:
             print("No models found. Please train models first.")
             return {}
         
@@ -781,16 +597,31 @@ class PowerDataClusteringPipeline:
         
         return manual_mappings
     
+    def apply_custom_mappings(self, custom_mappings: Dict):
+        """Apply custom business state mappings to hierarchical models"""
+        for level in ['primary', 'test_case']:
+            if level not in self.hierarchical_models:
+                continue
+                
+            for key, model_info in self.hierarchical_models[level].items():
+                if key in custom_mappings:
+                    data = model_info['data']
+                    cluster_col = f"cluster_{model_info['dc_channel']}" if 'dc_channel' in model_info and model_info['dc_channel'] != 'combined' else 'cluster'
+                    
+                    if cluster_col in data.columns:
+                        data['business_state'] = data[cluster_col].map(custom_mappings[key])
+                        data['business_state'].fillna('unknown', inplace=True)
+                        model_info['business_mapping'] = custom_mappings[key]
+    
     def create_multilevel_summary(self):
         """
         Create comprehensive summary statistics at multiple levels
-        Works with hierarchical models structure
         """
         print("\n" + "="*60)
         print("Multi-Level Summary Statistics")
         print("="*60)
         
-        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+        if not self.hierarchical_models:
             print("No models found. Skipping multilevel summary.")
             return
         
@@ -841,18 +672,18 @@ class PowerDataClusteringPipeline:
             print(f"Saved multi-level summary to {summary_path}")
         else:
             print("No summaries to create")
+        
+        return all_summaries
     
-    def analyze_aircraft_anomalies(self):
+    def analyze_ofp_anomalies(self):
         """
-        Comprehensive aircraft-level analysis to identify problematic aircraft
-        Note: Uses 'ofp' column since 'aircraft' is not in the data
-        Works with hierarchical models structure
+        Comprehensive OFP-level analysis to identify problematic OFPs
         """
         print("\n" + "="*60)
-        print("OFP-Level Anomaly Analysis (Aircraft Proxy)")
+        print("OFP-Level Anomaly Analysis")
         print("="*60)
         
-        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+        if not self.hierarchical_models:
             print("No models found. Please train models first.")
             return None
         
@@ -876,10 +707,10 @@ class PowerDataClusteringPipeline:
         combined_data = pd.concat(all_data, ignore_index=True)
         
         # Check which column to use (ofp or aircraft)
-        id_column = 'ofp' if 'ofp' in combined_data.columns else 'aircraft' if 'aircraft' in combined_data.columns else None
+        id_column = 'ofp' if 'ofp' in combined_data.columns else None
         
         if not id_column:
-            print("No 'ofp' or 'aircraft' column found in data")
+            print("No 'ofp' column found in data")
             return None
         
         print(f"Using '{id_column}' column for analysis")
@@ -932,7 +763,8 @@ class PowerDataClusteringPipeline:
                         metrics['avg_ramp_down_time'] = len(ramp_down_data) / metrics['total_runs'] if metrics['total_runs'] > 0 else 0
                         metrics['avg_ramp_down_slope'] = ramp_down_data['slope_3_V_dc1'].mean()
                     
-                    metrics['de_energized_percentage'] = len(entity_data[entity_data['business_state'] == 'de_energized']) / len(entity_data) * 100
+                    de_energized_count = len(entity_data[entity_data['business_state'] == 'de_energized'])
+                    metrics['de_energized_percentage'] = de_energized_count / len(entity_data) * 100 if len(entity_data) > 0 else 0
                 
                 # Check for unusual patterns
                 if 'cluster' in entity_data.columns:
@@ -996,7 +828,7 @@ class PowerDataClusteringPipeline:
     
     def _create_entity_comparison_plots(self, entity_df: pd.DataFrame, combined_data: pd.DataFrame, id_column: str):
         """
-        Create visualizations comparing entity (OFP/Aircraft) performance
+        Create visualizations comparing entity (OFP) performance
         """
         fig, axes = plt.subplots(3, 2, figsize=(15, 12))
         fig.suptitle(f'{id_column.upper()} Performance Comparison', fontsize=16)
@@ -1012,289 +844,78 @@ class PowerDataClusteringPipeline:
             ax.set_title(f'Top 10 {id_column.upper()}s by Anomaly Score')
             ax.axvline(x=0, color='red', linestyle='--', alpha=0.5)
         
-        # Continue with other plots...
+        # Plot 2: Voltage stability
+        ax = axes[0, 1]
+        if 'voltage_stability' in entity_df.columns:
+            sorted_df = entity_df.sort_values('voltage_stability', ascending=False).head(10)
+            ax.barh(range(len(sorted_df)), sorted_df['voltage_stability'])
+            ax.set_yticks(range(len(sorted_df)))
+            ax.set_yticklabels(sorted_df[id_column])
+            ax.set_xlabel('Voltage Standard Deviation')
+            ax.set_title('Most Unstable Voltage')
+        
+        # Plot 3: Voltage drop frequency
+        ax = axes[1, 0]
+        if 'voltage_drop_rate' in entity_df.columns:
+            sorted_df = entity_df.sort_values('voltage_drop_rate', ascending=False).head(10)
+            ax.bar(range(len(sorted_df)), sorted_df['voltage_drop_rate'])
+            ax.set_xticks(range(len(sorted_df)))
+            ax.set_xticklabels(sorted_df[id_column], rotation=45, ha='right')
+            ax.set_ylabel('Drop Rate (%)')
+            ax.set_title('Voltage Drop Frequency')
+        
+        # Plot 4: Transition rate
+        ax = axes[1, 1]
+        if 'transition_rate' in entity_df.columns:
+            sorted_df = entity_df.sort_values('transition_rate', ascending=False).head(10)
+            ax.bar(range(len(sorted_df)), sorted_df['transition_rate'])
+            ax.set_xticks(range(len(sorted_df)))
+            ax.set_xticklabels(sorted_df[id_column], rotation=45, ha='right')
+            ax.set_ylabel('Transition Rate (%)')
+            ax.set_title('State Transition Frequency')
+        
+        # Plot 5: Test diversity vs issues
+        ax = axes[2, 0]
+        if 'total_tests' in entity_df.columns and 'anomaly_score' in entity_df.columns:
+            ax.scatter(entity_df['total_tests'], entity_df['anomaly_score'], alpha=0.6)
+            ax.set_xlabel('Number of Test Cases')
+            ax.set_ylabel('Anomaly Score')
+            ax.set_title('Test Diversity vs Anomaly Score')
+        
+        # Plot 6: Voltage profile of worst entity
+        ax = axes[2, 1]
+        if 'voltage_28v_dc1_cal' in combined_data.columns and 'anomaly_score' in entity_df.columns:
+            worst_entity = entity_df.iloc[0][id_column]
+            worst_data = combined_data[combined_data[id_column] == worst_entity]
+            
+            if len(worst_data) > 0:
+                # Sample if too many points
+                if len(worst_data) > 5000:
+                    worst_data = worst_data.sample(5000)
+                
+                ax.plot(worst_data['voltage_28v_dc1_cal'].values, alpha=0.7, linewidth=0.5)
+                ax.set_xlabel('Time Index')
+                ax.set_ylabel('Voltage (V)')
+                ax.set_title(f'Voltage Profile: {id_column.upper()} {worst_entity}')
+                ax.axhline(y=28, color='g', linestyle='--', alpha=0.5, label='Target')
+                ax.axhline(y=25, color='r', linestyle='--', alpha=0.5, label='Low Threshold')
+                ax.legend()
+        
         plt.tight_layout()
         plt.savefig(self.plots_dir / f'{id_column}_comparison_analysis.png', dpi=100, bbox_inches='tight')
         plt.close()
         
         print(f"Saved {id_column} comparison plots")
     
-    def run_full_pipeline(self, 
-                         custom_mappings: Dict = None,
-                         analyze_granularity: bool = True,
-                         primary_grouping: List[str] = None,
-                         min_points_for_model: int = 500,
-                         plot_all_groupings: bool = True,
-                         split_by_dc: bool = False):
-        """
-        Execute the complete clustering pipeline with smart granularity handling
-        
-        Args:
-            custom_mappings: Optional dictionary of group -> cluster -> business_state mappings
-            analyze_granularity: Whether to analyze and recommend grouping level
-            primary_grouping: Grouping columns to use (e.g., ['test_case', 'ofp'])
-                            If None, will recommend based on analysis
-            min_points_for_model: Minimum points needed to train a dedicated model
-            plot_all_groupings: Whether to create plots for every full grouping combination
-            split_by_dc: If True, train separate models for DC1 and DC2 channels
-        """
-        
-        # Step 1: Load and prepare data
-        print("\n" + "="*60)
-        print("STEP 1: Loading and Preparing Data")
-        print("="*60)
-        self.load_and_prepare_data()
-        
-        # Step 2: Analyze granularity if requested
-        if analyze_granularity:
-            print("\n" + "="*60)
-            print("STEP 2: Analyzing Grouping Granularity")
-            print("="*60)
-            granularity_df = self.analyze_grouping_granularity()
-            
-            # Recommend grouping if not provided
-            if primary_grouping is None:
-                print("\n" + "-"*40)
-                print("RECOMMENDATION:")
-                # Find sweet spot - enough groups but not too many tiny ones
-                for _, row in granularity_df.iterrows():
-                    if row['num_groups'] < 50 and row['avg_points_per_group'] > 1000:
-                        primary_grouping = row['grouping'].split(' + ')
-                        print(f"Recommended grouping: {row['grouping']}")
-                        print(f"This will create {row['num_groups']} models")
-                        print(f"Average {row['avg_points_per_group']:.0f} points per model")
-                        break
-                
-                if primary_grouping is None:
-                    primary_grouping = ['test_case', 'ofp']
-                    print(f"Using default: test_case + ofp")
-        
-        # Step 3: Train hierarchical models
-        print("\n" + "="*60)
-        print("STEP 3: Training Hierarchical Models")
-        if split_by_dc:
-            print("*** SPLITTING BY DC CHANNEL ***")
-        print("="*60)
-        self.train_hierarchical_models(
-            primary_grouping=primary_grouping or ['test_case', 'ofp'],
-            min_points_for_model=min_points_for_model,
-            split_by_dc=split_by_dc
-        )
-        
-        # Step 4: Apply custom mappings if provided
-        if custom_mappings:
-            print("\n" + "="*60)
-            print("STEP 4: Applying Custom Business Mappings")
-            print("="*60)
-            self.apply_custom_mappings_hierarchical(custom_mappings)
-        else:
-            print("\n" + "="*60)
-            print("STEP 4: Review Statistics to Create Mappings")
-            print("="*60)
-            self.create_manual_mapping_interface_hierarchical()
-        
-        # Step 5: Create multi-level summaries
-        print("\n" + "="*60)
-        print("STEP 5: Creating Multi-Level Summaries")
-        print("="*60)
-        self.create_multilevel_summary_hierarchical()
-        
-        # Step 6: OFP anomaly analysis
-        print("\n" + "="*60)
-        print("STEP 6: OFP Anomaly Detection")
-        print("="*60)
-        self.analyze_ofp_anomalies_hierarchical()
-        
-        # Step 7: Plot all full groupings if requested
-        if plot_all_groupings:
-            print("\n" + "="*60)
-            print("STEP 7: Creating Full Grouping Visualizations")
-            if split_by_dc:
-                print("*** Including DC Channel Split Visualizations ***")
-            print("="*60)
-            self.plot_all_groupings_with_clusters()
-        
-        print("\n" + "="*60)
-        print("Pipeline Complete!")
-        print(f"Results saved to: {self.output_dir}")
-        if split_by_dc:
-            print("Models trained separately for DC1 and DC2 channels")
-        print("="*60)
-        
-        return self.hierarchical_models
-    
-    def apply_custom_mappings_hierarchical(self, custom_mappings: Dict):
-        """Apply custom mappings to hierarchical models"""
-        for level in ['primary', 'test_case']:
-            for key, model_info in self.hierarchical_models[level].items():
-                if key in custom_mappings:
-                    data = model_info['data']
-                    data['business_state'] = data['cluster'].map(custom_mappings[key])
-                    data['business_state'].fillna('unknown', inplace=True)
-                    model_info['business_mapping'] = custom_mappings[key]
-    
-    def create_manual_mapping_interface_hierarchical(self):
-        """Show statistics for all models to help with manual mapping"""
-        print("\nModel Statistics for Manual Mapping:")
-        print("="*50)
-        
-        all_models = []
-        for level in ['primary', 'test_case']:
-            for key, model_info in self.hierarchical_models[level].items():
-                all_models.append((level, key, model_info))
-        
-        for level, key, model_info in all_models:
-            print(f"\n[{level}] {key}:")
-            print(f"  Points: {model_info['n_points']}, Clusters: {model_info['n_clusters']}")
-            
-            stats_df = model_info['cluster_mapping']['stats']
-            for _, row in stats_df.iterrows():
-                print(f"    Cluster {row['cluster']}: {row['percentage']:.1f}% | "
-                      f"V={row.get('avg_voltage_dc1', 0):.1f} | "
-                      f"Slope={row.get('avg_slope_dc1', 0):.3f} | "
-                      f"Pos={row.get('avg_position', 0.5)*100:.0f}%")
-    
-    def create_multilevel_summary_hierarchical(self):
-        """Create summaries for hierarchical models"""
-        
-        # Check if we have models
-        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
-            print("No models found. Skipping multilevel summary.")
-            return
-            
-        all_summaries = []
-        
-        for level in ['primary', 'test_case']:
-            if level in self.hierarchical_models:
-                for key, model_info in self.hierarchical_models[level].items():
-                    data = model_info['data']
-                    
-                    if 'business_state' in data.columns:
-                        summary = data.groupby('business_state').agg({
-                            'cluster': 'count'
-                        }).rename(columns={'cluster': 'count'})
-                        summary['model'] = f"{level}_{key}"
-                        all_summaries.append(summary)
-        
-        if all_summaries:
-            combined = pd.concat(all_summaries)
-            summary_path = self.stats_dir / "hierarchical_model_summary.csv"
-            combined.to_csv(summary_path)
-            print(f"Saved hierarchical model summary to {summary_path}")
-        else:
-            print("No summaries to save")
-    
-    def analyze_ofp_anomalies_hierarchical(self):
-        """Analyze OFP anomalies using hierarchical models"""
-        
-        # Check if we have models to analyze
-        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
-            print("No models found. Please train models first.")
-            return None
-            
-        all_data = []
-        
-        for level in ['primary', 'test_case']:
-            if level in self.hierarchical_models:
-                for key, model_info in self.hierarchical_models[level].items():
-                    data = model_info['data'].copy()
-                    data['model_level'] = level
-                    data['model_key'] = key
-                    all_data.append(data)
-        
-        if not all_data:
-            print("No data found in models")
-            return None
-            
-        combined_data = pd.concat(all_data, ignore_index=True)
-        
-        # Remove duplicates (same data point from different model levels)
-        if 'ofp' in combined_data.columns:
-            # Keep primary model predictions when available
-            dedup_cols = ['ofp', 'test_case', 'test_run'] if all(col in combined_data.columns for col in ['ofp', 'test_case', 'test_run']) else ['ofp']
-            combined_data = combined_data.sort_values('model_level').drop_duplicates(subset=dedup_cols)
-            
-            # Now run the anomaly analysis on deduplicated data
-            return self._perform_ofp_anomaly_analysis(combined_data)
-        else:
-            print("No 'ofp' column found in data")
-            return None
-    
-    def _perform_ofp_anomaly_analysis(self, combined_data: pd.DataFrame):
-        """Core OFP anomaly analysis logic"""
-        if 'ofp' not in combined_data.columns:
-            print("No OFP column found")
-            return None
-            
-        ofp_metrics = []
-        
-        for ofp in combined_data['ofp'].unique():
-            ofp_data = combined_data[combined_data['ofp'] == ofp]
-            
-            metrics = {
-                'ofp': ofp,
-                'total_points': len(ofp_data),
-                'models_used': ofp_data['model_key'].nunique() if 'model_key' in ofp_data.columns else 1
-            }
-            
-            # Add test case diversity
-            if 'test_case' in ofp_data.columns:
-                metrics['test_cases'] = ofp_data['test_case'].nunique()
-            
-            # Calculate voltage metrics
-            if 'voltage_28v_dc1_cal' in ofp_data.columns:
-                metrics['avg_voltage'] = ofp_data['voltage_28v_dc1_cal'].mean()
-                metrics['voltage_std'] = ofp_data['voltage_28v_dc1_cal'].std()
-                metrics['voltage_drops'] = (ofp_data['voltage_28v_dc1_cal'] < 25).sum()
-                metrics['drop_rate'] = metrics['voltage_drops'] / len(ofp_data) * 100
-            
-            # Cluster transition metrics
-            if 'cluster' in ofp_data.columns:
-                transitions = ofp_data['cluster'].diff().ne(0).sum()
-                metrics['transitions'] = transitions
-                metrics['transition_rate'] = transitions / len(ofp_data) * 100
-            
-            ofp_metrics.append(metrics)
-        
-        ofp_df = pd.DataFrame(ofp_metrics)
-        
-        # Calculate anomaly scores
-        if len(ofp_df) > 1:
-            for col in ['voltage_std', 'drop_rate', 'transition_rate']:
-                if col in ofp_df.columns:
-                    ofp_df[f'{col}_zscore'] = (ofp_df[col] - ofp_df[col].mean()) / ofp_df[col].std()
-            
-            zscore_cols = [col for col in ofp_df.columns if col.endswith('_zscore')]
-            if zscore_cols:
-                ofp_df['anomaly_score'] = ofp_df[zscore_cols].mean(axis=1)
-                ofp_df = ofp_df.sort_values('anomaly_score', ascending=False)
-        
-        # Save results
-        ofp_path = self.stats_dir / "ofp_anomaly_analysis.csv"
-        ofp_df.to_csv(ofp_path, index=False)
-        
-        print("\nTop 5 Problematic OFPs:")
-        if 'anomaly_score' in ofp_df.columns:
-            print(ofp_df.head()[['ofp', 'anomaly_score', 'voltage_std', 'drop_rate', 'transition_rate']])
-        else:
-            print(ofp_df.head())
-        
-        # Create OFP comparison visualizations
-        self._create_ofp_comparison_plots(ofp_df, combined_data)
-        
-        return ofp_df
-    
     def plot_all_groupings_with_clusters(self):
         """
         Create comprehensive plots for EVERY full grouping combination showing their clusters
-        This helps visualize how well the clustering is working at the most granular level
         """
         print("\n" + "="*60)
         print("Creating Full Grouping Cluster Visualizations")
         print("="*60)
         
-        # Check if we have models
-        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+        if not self.hierarchical_models:
             print("No models found. Please train models first.")
             return None
             
@@ -1362,132 +983,14 @@ class PowerDataClusteringPipeline:
             n_points = len(cluster_data)
             n_clusters = cluster_data['cluster'].nunique()
             
-            # Create figure with subplots
-            fig = plt.figure(figsize=(20, 12))
-            
-            # Add title with grouping information
-            title_text = f"Full Grouping Analysis\n"
-            for k, v in group_dict.items():
-                title_text += f"{k}: {v} | "
-            title_text = title_text[:-3]  # Remove last separator
-            title_text += f"\nModel: {model_used} | Points: {n_points} | Clusters: {n_clusters}"
-            fig.suptitle(title_text, fontsize=12, y=0.98)
-            
-            # Create 6 subplots
-            gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-            
-            # Plot 1: Voltage time series colored by cluster
-            ax1 = fig.add_subplot(gs[0, :])
-            if 'voltage_28v_dc1_cal' in cluster_data.columns:
-                for cluster in sorted(cluster_data['cluster'].unique()):
-                    cluster_mask = cluster_data['cluster'] == cluster
-                    indices = np.where(cluster_mask)[0]
-                    ax1.scatter(indices, 
-                              cluster_data.loc[cluster_mask, 'voltage_28v_dc1_cal'],
-                              label=f'Cluster {cluster}',
-                              alpha=0.6, s=2)
-                ax1.set_xlabel('Time Index')
-                ax1.set_ylabel('Voltage DC1 (V)')
-                ax1.set_title('Voltage Time Series by Cluster')
-                ax1.legend(loc='upper right', ncol=n_clusters)
-                ax1.grid(True, alpha=0.3)
-            
-            # Plot 2: Cluster sequence
-            ax2 = fig.add_subplot(gs[1, 0])
-            ax2.plot(cluster_data['cluster'].values, linewidth=1, color='darkblue')
-            ax2.fill_between(range(len(cluster_data)), 
-                            cluster_data['cluster'].values, 
-                            alpha=0.3)
-            ax2.set_xlabel('Time Index')
-            ax2.set_ylabel('Cluster ID')
-            ax2.set_title('Cluster Transitions Over Time')
-            ax2.grid(True, alpha=0.3)
-            
-            # Plot 3: Voltage vs Slope scatter
-            ax3 = fig.add_subplot(gs[1, 1])
-            if 'voltage_28v_dc1_cal' in cluster_data.columns and 'slope_3_V_dc1' in cluster_data.columns:
-                scatter = ax3.scatter(cluster_data['voltage_28v_dc1_cal'], 
-                                    cluster_data['slope_3_V_dc1'],
-                                    c=cluster_data['cluster'],
-                                    cmap='viridis',
-                                    alpha=0.6, s=10)
-                ax3.set_xlabel('Voltage DC1 (V)')
-                ax3.set_ylabel('Slope DC1')
-                ax3.set_title('Feature Space Clustering')
-                plt.colorbar(scatter, ax=ax3, label='Cluster')
-                ax3.grid(True, alpha=0.3)
-            
-            # Plot 4: Cluster distribution pie chart
-            ax4 = fig.add_subplot(gs[1, 2])
-            cluster_counts = cluster_data['cluster'].value_counts().sort_index()
-            colors = plt.cm.viridis(np.linspace(0, 1, len(cluster_counts)))
-            wedges, texts, autotexts = ax4.pie(cluster_counts.values, 
-                                               labels=[f'C{i}' for i in cluster_counts.index],
-                                               colors=colors,
-                                               autopct='%1.1f%%',
-                                               startangle=90)
-            ax4.set_title('Cluster Distribution')
-            
-            # Plot 5: DC1 vs DC2 if both exist
-            ax5 = fig.add_subplot(gs[2, 0])
-            if 'voltage_28v_dc1_cal' in cluster_data.columns and 'voltage_28v_dc2_cal' in cluster_data.columns:
-                scatter = ax5.scatter(cluster_data['voltage_28v_dc1_cal'],
-                                    cluster_data['voltage_28v_dc2_cal'],
-                                    c=cluster_data['cluster'],
-                                    cmap='viridis',
-                                    alpha=0.6, s=10)
-                ax5.set_xlabel('Voltage DC1 (V)')
-                ax5.set_ylabel('Voltage DC2 (V)')
-                ax5.set_title('DC1 vs DC2 Correlation')
-                ax5.plot([0, 30], [0, 30], 'r--', alpha=0.3, label='y=x')
-                ax5.legend()
-                ax5.grid(True, alpha=0.3)
-            
-            # Plot 6: Cluster statistics table
-            ax6 = fig.add_subplot(gs[2, 1:])
-            ax6.axis('tight')
-            ax6.axis('off')
-            
-            # Calculate statistics for each cluster
-            cluster_stats = []
-            for cluster in sorted(cluster_data['cluster'].unique()):
-                c_data = cluster_data[cluster_data['cluster'] == cluster]
-                stats = [
-                    f"C{cluster}",
-                    f"{len(c_data)}",
-                    f"{len(c_data)/len(cluster_data)*100:.1f}%"
-                ]
-                
-                if 'voltage_28v_dc1_cal' in c_data.columns:
-                    stats.append(f"{c_data['voltage_28v_dc1_cal'].mean():.1f}V")
-                    stats.append(f"±{c_data['voltage_28v_dc1_cal'].std():.1f}")
-                
-                if 'slope_3_V_dc1' in c_data.columns:
-                    stats.append(f"{c_data['slope_3_V_dc1'].mean():.3f}")
-                
-                cluster_stats.append(stats)
-            
-            # Create table
-            columns = ['Cluster', 'Points', '%', 'Avg V', 'Std V', 'Avg Slope']
-            table = ax6.table(cellText=cluster_stats,
-                            colLabels=columns,
-                            cellLoc='center',
-                            loc='center',
-                            colColours=['lightgray']*len(columns))
-            table.auto_set_font_size(False)
-            table.set_fontsize(9)
-            table.scale(1, 1.5)
-            ax6.set_title('Cluster Statistics Summary', pad=20)
-            
-            # Save figure
-            plot_path = full_plots_dir / f"full_group_{idx:04d}_{group_str[:50]}.png"
-            plt.savefig(plot_path, dpi=100, bbox_inches='tight')
-            plt.close()
+            # Create detailed visualization
+            self._create_single_grouping_plot(cluster_data, group_dict, idx, full_plots_dir, 
+                                             model_used, n_points, n_clusters)
             
             # Add to summary
             grouping_summary.append({
                 'index': idx,
-                'filename': plot_path.name,
+                'filename': f"full_group_{idx:04d}_{group_str[:50]}.png",
                 **group_dict,
                 'n_points': n_points,
                 'n_clusters': n_clusters,
@@ -1510,15 +1013,140 @@ class PowerDataClusteringPipeline:
         print(f"Plots saved in: {full_plots_dir}")
         print(f"Index saved as: {summary_path}")
         
-        # Create a master summary plot showing all groupings
+        # Create a master summary plot
         self._create_grouping_overview_plot(summary_df)
         
         return summary_df
     
+    def _create_single_grouping_plot(self, cluster_data, group_dict, idx, full_plots_dir, 
+                                    model_used, n_points, n_clusters):
+        """Create a single detailed plot for a grouping"""
+        
+        fig = plt.figure(figsize=(20, 12))
+        
+        # Add title with grouping information
+        title_text = f"Full Grouping Analysis\n"
+        for k, v in group_dict.items():
+            title_text += f"{k}: {v} | "
+        title_text = title_text[:-3]  # Remove last separator
+        title_text += f"\nModel: {model_used} | Points: {n_points} | Clusters: {n_clusters}"
+        fig.suptitle(title_text, fontsize=12, y=0.98)
+        
+        # Create 6 subplots
+        gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+        
+        # Plot 1: Voltage time series colored by cluster
+        ax1 = fig.add_subplot(gs[0, :])
+        if 'voltage_28v_dc1_cal' in cluster_data.columns:
+            for cluster in sorted(cluster_data['cluster'].unique()):
+                cluster_mask = cluster_data['cluster'] == cluster
+                indices = np.where(cluster_mask)[0]
+                ax1.scatter(indices, 
+                          cluster_data.loc[cluster_mask, 'voltage_28v_dc1_cal'],
+                          label=f'Cluster {cluster}',
+                          alpha=0.6, s=2)
+            ax1.set_xlabel('Time Index')
+            ax1.set_ylabel('Voltage DC1 (V)')
+            ax1.set_title('Voltage Time Series by Cluster')
+            ax1.legend(loc='upper right', ncol=n_clusters)
+            ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Cluster sequence
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax2.plot(cluster_data['cluster'].values, linewidth=1, color='darkblue')
+        ax2.fill_between(range(len(cluster_data)), 
+                        cluster_data['cluster'].values, 
+                        alpha=0.3)
+        ax2.set_xlabel('Time Index')
+        ax2.set_ylabel('Cluster ID')
+        ax2.set_title('Cluster Transitions Over Time')
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Voltage vs Slope scatter
+        ax3 = fig.add_subplot(gs[1, 1])
+        if 'voltage_28v_dc1_cal' in cluster_data.columns and 'slope_3_V_dc1' in cluster_data.columns:
+            scatter = ax3.scatter(cluster_data['voltage_28v_dc1_cal'], 
+                                cluster_data['slope_3_V_dc1'],
+                                c=cluster_data['cluster'],
+                                cmap='viridis',
+                                alpha=0.6, s=10)
+            ax3.set_xlabel('Voltage DC1 (V)')
+            ax3.set_ylabel('Slope DC1')
+            ax3.set_title('Feature Space Clustering')
+            plt.colorbar(scatter, ax=ax3, label='Cluster')
+            ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Cluster distribution pie chart
+        ax4 = fig.add_subplot(gs[1, 2])
+        cluster_counts = cluster_data['cluster'].value_counts().sort_index()
+        colors = plt.cm.viridis(np.linspace(0, 1, len(cluster_counts)))
+        wedges, texts, autotexts = ax4.pie(cluster_counts.values, 
+                                           labels=[f'C{i}' for i in cluster_counts.index],
+                                           colors=colors,
+                                           autopct='%1.1f%%',
+                                           startangle=90)
+        ax4.set_title('Cluster Distribution')
+        
+        # Plot 5: DC1 vs DC2 if both exist
+        ax5 = fig.add_subplot(gs[2, 0])
+        if 'voltage_28v_dc1_cal' in cluster_data.columns and 'voltage_28v_dc2_cal' in cluster_data.columns:
+            scatter = ax5.scatter(cluster_data['voltage_28v_dc1_cal'],
+                                cluster_data['voltage_28v_dc2_cal'],
+                                c=cluster_data['cluster'],
+                                cmap='viridis',
+                                alpha=0.6, s=10)
+            ax5.set_xlabel('Voltage DC1 (V)')
+            ax5.set_ylabel('Voltage DC2 (V)')
+            ax5.set_title('DC1 vs DC2 Correlation')
+            ax5.plot([0, 30], [0, 30], 'r--', alpha=0.3, label='y=x')
+            ax5.legend()
+            ax5.grid(True, alpha=0.3)
+        
+        # Plot 6: Cluster statistics table
+        ax6 = fig.add_subplot(gs[2, 1:])
+        ax6.axis('tight')
+        ax6.axis('off')
+        
+        # Calculate statistics for each cluster
+        cluster_stats = []
+        for cluster in sorted(cluster_data['cluster'].unique()):
+            c_data = cluster_data[cluster_data['cluster'] == cluster]
+            stats = [
+                f"C{cluster}",
+                f"{len(c_data)}",
+                f"{len(c_data)/len(cluster_data)*100:.1f}%"
+            ]
+            
+            if 'voltage_28v_dc1_cal' in c_data.columns:
+                stats.append(f"{c_data['voltage_28v_dc1_cal'].mean():.1f}V")
+                stats.append(f"±{c_data['voltage_28v_dc1_cal'].std():.1f}")
+            
+            if 'slope_3_V_dc1' in c_data.columns:
+                stats.append(f"{c_data['slope_3_V_dc1'].mean():.3f}")
+            
+            cluster_stats.append(stats)
+        
+        # Create table
+        columns = ['Cluster', 'Points', '%', 'Avg V', 'Std V', 'Avg Slope']
+        table = ax6.table(cellText=cluster_stats,
+                        colLabels=columns,
+                        cellLoc='center',
+                        loc='center',
+                        colColours=['lightgray']*len(columns))
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.5)
+        ax6.set_title('Cluster Statistics Summary', pad=20)
+        
+        # Save figure
+        group_str = '_'.join([f"{k}={v}" for k, v in group_dict.items()])
+        group_str = group_str.replace('/', '_').replace('\\', '_')[:100]
+        plot_path = full_plots_dir / f"full_group_{idx:04d}_{group_str[:50]}.png"
+        plt.savefig(plot_path, dpi=100, bbox_inches='tight')
+        plt.close()
+    
     def _create_grouping_overview_plot(self, summary_df: pd.DataFrame):
-        """
-        Create a master overview plot showing statistics across all groupings
-        """
+        """Create a master overview plot showing statistics across all groupings"""
         if len(summary_df) == 0:
             return
             
@@ -1569,99 +1197,10 @@ class PowerDataClusteringPipeline:
         plt.close()
         
         print(f"Saved overview plot: {overview_path}")
-        """
-        Create visualizations comparing OFP performance
-        """
-        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
-        fig.suptitle('OFP Performance Comparison', fontsize=16)
-        
-        # Plot 1: Anomaly scores by OFP
-        ax = axes[0, 0]
-        if 'anomaly_score' in ofp_df.columns:
-            ofp_sorted = ofp_df.sort_values('anomaly_score', ascending=False).head(10)
-            ax.barh(range(len(ofp_sorted)), ofp_sorted['anomaly_score'])
-            ax.set_yticks(range(len(ofp_sorted)))
-            ax.set_yticklabels(ofp_sorted['ofp'])
-            ax.set_xlabel('Anomaly Score (Higher = More Issues)')
-            ax.set_title('Top 10 OFPs by Anomaly Score')
-            ax.axvline(x=0, color='red', linestyle='--', alpha=0.5)
-        
-        # Plot 2: Voltage stability comparison
-        ax = axes[0, 1]
-        if 'voltage_std' in ofp_df.columns:
-            ofp_sorted = ofp_df.sort_values('voltage_std', ascending=False).head(10)
-            ax.barh(range(len(ofp_sorted)), ofp_sorted['voltage_std'])
-            ax.set_yticks(range(len(ofp_sorted)))
-            ax.set_yticklabels(ofp_sorted['ofp'])
-            ax.set_xlabel('Voltage Stability (Std Dev)')
-            ax.set_title('OFPs with Highest Voltage Instability')
-        
-        # Plot 3: State distribution by OFP
-        ax = axes[1, 0]
-        if 'business_state' in combined_data.columns:
-            top_ofps = ofp_df.head(5)['ofp'].tolist() if len(ofp_df) > 5 else ofp_df['ofp'].tolist()
-            state_dist = combined_data[combined_data['ofp'].isin(top_ofps)].groupby(['ofp', 'business_state']).size().unstack(fill_value=0)
-            state_dist_pct = state_dist.div(state_dist.sum(axis=1), axis=0) * 100
-            state_dist_pct.plot(kind='bar', stacked=True, ax=ax)
-            ax.set_xlabel('OFP')
-            ax.set_ylabel('State Distribution (%)')
-            ax.set_title('Power State Distribution by OFP')
-            ax.legend(title='State', bbox_to_anchor=(1.05, 1), loc='upper left')
-        
-        # Plot 4: Voltage drop frequency
-        ax = axes[1, 1]
-        if 'drop_rate' in ofp_df.columns and 'test_cases' in ofp_df.columns:
-            ax.scatter(ofp_df['test_cases'], ofp_df['drop_rate'], 
-                      s=ofp_df['total_points']/100, alpha=0.6)
-            ax.set_xlabel('Number of Test Cases')
-            ax.set_ylabel('Voltage Drop Rate (%)')
-            ax.set_title('Voltage Drop Rate vs Test Diversity\n(bubble size = data points)')
-            
-            # Annotate outliers
-            for _, row in ofp_df.iterrows():
-                if row['drop_rate'] > ofp_df['drop_rate'].mean() + 2*ofp_df['drop_rate'].std():
-                    ax.annotate(row['ofp'], (row['test_cases'], row['drop_rate']),
-                              fontsize=8, alpha=0.7)
-        
-        # Plot 5: Transition rate comparison
-        ax = axes[2, 0]
-        if 'transition_rate' in ofp_df.columns:
-            ofp_sorted = ofp_df.sort_values('transition_rate', ascending=False).head(10)
-            ax.bar(range(len(ofp_sorted)), ofp_sorted['transition_rate'])
-            ax.set_xticks(range(len(ofp_sorted)))
-            ax.set_xticklabels(ofp_sorted['ofp'], rotation=45, ha='right')
-            ax.set_ylabel('Transition Rate (%)')
-            ax.set_title('State Transition Frequency (Higher = Less Stable)')
-        
-        # Plot 6: Voltage profile of worst OFP
-        ax = axes[2, 1]
-        if 'voltage_28v_dc1_cal' in combined_data.columns and 'anomaly_score' in ofp_df.columns:
-            worst_ofp = ofp_df.iloc[0]['ofp']
-            worst_data = combined_data[combined_data['ofp'] == worst_ofp]
-            
-            if len(worst_data) > 0:
-                # Sample if too many points
-                if len(worst_data) > 5000:
-                    worst_data = worst_data.sample(5000)
-                
-                ax.plot(worst_data['voltage_28v_dc1_cal'].values, alpha=0.7, linewidth=0.5)
-                ax.set_xlabel('Time Index')
-                ax.set_ylabel('Voltage (V)')
-                ax.set_title(f'Voltage Profile: OFP {worst_ofp}\n(Most Problematic)')
-                ax.axhline(y=28, color='g', linestyle='--', alpha=0.5, label='Target')
-                ax.axhline(y=25, color='r', linestyle='--', alpha=0.5, label='Low Threshold')
-                ax.legend()
-        
-        plt.tight_layout()
-        plt.savefig(self.plots_dir / 'ofp_comparison_analysis.png', dpi=100, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Saved OFP comparison plots")
     
     def predict_new_data(self, new_data_path: str, model_key: str = None, test_case: str = None) -> pd.DataFrame:
         """
         Use a trained model to predict on new data
-        Works with hierarchical models structure
         
         Args:
             new_data_path: Path to new parquet file
@@ -1671,7 +1210,7 @@ class PowerDataClusteringPipeline:
         Returns:
             DataFrame with predictions
         """
-        if not hasattr(self, 'hierarchical_models') or not self.hierarchical_models:
+        if not self.hierarchical_models:
             raise ValueError("No models found. Please train models first.")
         
         # Find the appropriate model
@@ -1757,7 +1296,26 @@ class PowerDataClusteringPipeline:
         
         df.fillna(method='bfill', inplace=True)
         df.fillna(method='ffill', inplace=True)
-        """Execute the complete clustering pipeline"""
+    
+    def run_full_pipeline(self, 
+                         custom_mappings: Dict = None,
+                         analyze_granularity: bool = True,
+                         primary_grouping: List[str] = None,
+                         min_points_for_model: int = 500,
+                         plot_all_groupings: bool = True,
+                         split_by_dc: bool = False):
+        """
+        Execute the complete clustering pipeline with smart granularity handling
+        
+        Args:
+            custom_mappings: Optional dictionary of group -> cluster -> business_state mappings
+            analyze_granularity: Whether to analyze and recommend grouping level
+            primary_grouping: Grouping columns to use (e.g., ['test_case', 'ofp'])
+                            If None, will recommend based on analysis
+            min_points_for_model: Minimum points needed to train a dedicated model
+            plot_all_groupings: Whether to create plots for every full grouping combination
+            split_by_dc: If True, train separate models for DC1 and DC2 channels
+        """
         
         # Step 1: Load and prepare data
         print("\n" + "="*60)
@@ -1765,36 +1323,83 @@ class PowerDataClusteringPipeline:
         print("="*60)
         self.load_and_prepare_data()
         
-        # Step 2: Train models for each test case
-        print("\n" + "="*60)
-        print("STEP 2: Training Models")
-        print("="*60)
-        self.train_test_case_models()
+        # Step 2: Analyze granularity if requested
+        if analyze_granularity:
+            print("\n" + "="*60)
+            print("STEP 2: Analyzing Grouping Granularity")
+            print("="*60)
+            granularity_df = self.analyze_grouping_granularity()
+            
+            # Recommend grouping if not provided
+            if primary_grouping is None:
+                print("\n" + "-"*40)
+                print("RECOMMENDATION:")
+                # Find sweet spot - enough groups but not too many tiny ones
+                for _, row in granularity_df.iterrows():
+                    if row['num_groups'] < 50 and row['avg_points_per_group'] > 1000:
+                        primary_grouping = row['grouping'].split(' + ')
+                        print(f"Recommended grouping: {row['grouping']}")
+                        print(f"This will create {row['num_groups']} models")
+                        print(f"Average {row['avg_points_per_group']:.0f} points per model")
+                        break
+                
+                if primary_grouping is None:
+                    primary_grouping = ['test_case', 'ofp']
+                    print(f"Using default: test_case + ofp")
         
-        # Step 3: Apply business logic
+        # Step 3: Train hierarchical models
         print("\n" + "="*60)
-        print("STEP 3: Applying Business Logic")
+        print("STEP 3: Training Hierarchical Models")
+        if split_by_dc:
+            print("*** SPLITTING BY DC CHANNEL ***")
         print("="*60)
-        self.create_business_state_mapping()
+        self.train_hierarchical_models(
+            primary_grouping=primary_grouping or ['test_case', 'ofp'],
+            min_points_for_model=min_points_for_model,
+            split_by_dc=split_by_dc
+        )
         
-        # Step 4: Create multi-level summaries
+        # Step 4: Apply custom mappings if provided
+        if custom_mappings:
+            print("\n" + "="*60)
+            print("STEP 4: Applying Custom Business Mappings")
+            print("="*60)
+            self.apply_custom_mappings(custom_mappings)
+        else:
+            print("\n" + "="*60)
+            print("STEP 4: Review Statistics to Create Mappings")
+            print("="*60)
+            self.create_manual_mapping_interface()
+        
+        # Step 5: Create multi-level summaries
         print("\n" + "="*60)
-        print("STEP 4: Creating Multi-Level Summaries")
+        print("STEP 5: Creating Multi-Level Summaries")
         print("="*60)
         self.create_multilevel_summary()
         
-        # Step 5: Aircraft anomaly analysis
+        # Step 6: OFP anomaly analysis
         print("\n" + "="*60)
-        print("STEP 5: Aircraft Anomaly Detection")
+        print("STEP 6: OFP Anomaly Detection")
         print("="*60)
-        self.analyze_aircraft_anomalies()
+        self.analyze_ofp_anomalies()
+        
+        # Step 7: Plot all full groupings if requested
+        if plot_all_groupings:
+            print("\n" + "="*60)
+            print("STEP 7: Creating Full Grouping Visualizations")
+            if split_by_dc:
+                print("*** Including DC Channel Split Visualizations ***")
+            print("="*60)
+            self.plot_all_groupings_with_clusters()
         
         print("\n" + "="*60)
         print("Pipeline Complete!")
         print(f"Results saved to: {self.output_dir}")
+        if split_by_dc:
+            print("Models trained separately for DC1 and DC2 channels")
         print("="*60)
         
-        return self.test_case_models
+        return self.hierarchical_models
 
 
 # Example usage
@@ -1805,13 +1410,33 @@ if __name__ == "__main__":
         output_dir="./power_clustering_results"
     )
     
-    # Run full pipeline
-    models = pipeline.run_full_pipeline()
+    # Example 1: Run with automatic granularity detection
+    models = pipeline.run_full_pipeline(
+        analyze_granularity=True,
+        split_by_dc=False  # Set to True to train separate models for DC1 and DC2
+    )
     
-    # The models dictionary now contains everything needed for deployment
-    # Each test case has:
-    # - Trained model
-    # - Scaler
-    # - Feature list
-    # - Cluster mappings
-    # - Processed data with business states
+    # Example 2: Run with specific grouping and custom mappings
+    custom_mappings = {
+        'test_case1_ofp1': {
+            0: 'de_energized',
+            1: 'ramp_up',
+            2: 'steady_state',
+            3: 'ramp_down'
+        },
+        # Add more mappings as needed
+    }
+    
+    models = pipeline.run_full_pipeline(
+        primary_grouping=['test_case', 'ofp'],
+        custom_mappings=custom_mappings,
+        min_points_for_model=500,
+        plot_all_groupings=True,
+        split_by_dc=True  # Train separate models for DC channels
+    )
+    
+    # Example 3: Use trained model for prediction on new data
+    new_predictions = pipeline.predict_new_data(
+        new_data_path="new_test_data.parquet",
+        test_case="test_case1"  # Or use model_key="specific_model_key"
+    )
