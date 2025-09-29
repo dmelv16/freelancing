@@ -110,11 +110,18 @@ def process_single_group_complete(group_df, group_values, group_cols, voltage_co
             # Initialize with correct parameters
             segmenter = GreedyGaussianSegmenter(k_max=5, max_shuffles=1)
             
-            # Features should already be in shape (n_points, n_features)
-            # The segmenter expects time series data where:
-            # - Each row is a time point
-            # - Each column is a feature/variable
-            segments = segmenter.fit_predict(features)
+            # Match what your colleagues do: transpose the features
+            # Original features shape: (n_timepoints, n_features)
+            # Transposed shape: (n_features, n_timepoints)
+            features_transposed = features.T
+            
+            print(f"    Transposed features shape: {features_transposed.shape}")
+            print(f"    Features type: {type(features_transposed)}")
+            
+            # Run segmentation on transposed features
+            segments = segmenter.fit_predict(features_transposed)
+            
+            print(f"    Segmentation complete. Segments shape: {segments.shape}")
             
             # Get segment statistics using all data
             stats = get_segment_stats_complete(voltage_data, segments)
@@ -133,6 +140,7 @@ def process_single_group_complete(group_df, group_values, group_cols, voltage_co
             
         except Exception as e:
             print(f"  Error segmenting {col}: {e}")
+            print(f"  Error details: {type(e).__name__}")
             import traceback
             traceback.print_exc()
             continue
