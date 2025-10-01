@@ -1,68 +1,211 @@
-def is_deenergized(self, voltages: np.ndarray, labels: np.ndarray, timestamps: np.ndarray, 
-                   slope_threshold: float = 0.1, mean_threshold: float = 5) -> np.ndarray:
-    from scipy.stats import linregress
-    
-    unique_labels = np.unique(labels)
-    deenergized_clusters = np.zeros_like(unique_labels, dtype=bool)
-    cluster_mean_voltages = []
-    
-    for ix, lab in enumerate(unique_labels):
-        cluster_mask = labels == lab
-        if np.sum(cluster_mask) > 1:  # Need at least 2 points for regression
-            cluster_mean_voltage = np.mean(voltages[cluster_mask])
-            cluster_abs_slope = np.abs(
-                linregress(timestamps[cluster_mask], voltages[cluster_mask]).slope)
+    def is_deenergized(self, voltages, labels, timestamps, slope_threshold=0.1, mean_threshold=5):
+        """
+        Identify de-energized segments based on slope and mean voltage.
+        Returns a boolean mask array.
+        """
+        try:
+            from scipy.stats import linregress
+            import numpy as np
             
-            if (cluster_abs_slope < slope_threshold and cluster_mean_voltage < mean_threshold):
-                deenergized_clusters[ix] = True
-            cluster_mean_voltages.append(cluster_mean_voltage)
-        else:
-            cluster_mean_voltages.append(np.mean(voltages[cluster_mask]))
+            # Ensure inputs are numpy arrays
+            voltages = np.asarray(voltages)
+            labels = np.asarray(labels)
+            timestamps = np.asarray(timestamps)
+            
+            # Get unique labels
+            unique_labels = np.unique(labels)
+            
+            # Initialize mask - all False initially
+            deenergized_mask = np.zeros(len(voltages), dtype=bool)
+            
+            # Check each cluster
+            for lab in unique_labels:
+                # Get points in this cluster
+                cluster_mask = (labels == lab)
+                cluster_voltages = voltages[cluster_mask]
+                cluster_timestamps = timestamps[cluster_mask]
+                
+                if len(cluster_voltages) < 2:
+                    # Not enough points for regression, use mean only
+                    if np.mean(cluster_voltages) < mean_threshold:
+                        deenergized_mask[cluster_mask] = True
+                else:
+                    # Calculate slope and mean
+                    try:
+                        slope = abs(linregress(cluster_timestamps, cluster_voltages).slope)
+                        mean_voltage = np.mean(cluster_voltages)
+                        
+                        # Check if cluster is de-energized
+                        if slope < slope_threshold and mean_voltage < mean_threshold:
+                            deenergized_mask[cluster_mask] = True
+                    except:
+                        # If regression fails, use mean only
+                        if np.mean(cluster_voltages) < mean_threshold:
+                            deenergized_mask[cluster_mask] = True
+            
+            return deenergized_mask
+            
+        except Exception as e:
+            print(f"Error in is_deenergized: {e}")
+            # Return all False if error
+            return np.zeros(len(voltages), dtype=bool)
     
-    if len(deenergized_clusters) > 2:
-        for i in range(1, len(deenergized_clusters) - 1):
-            if (deenergized_clusters[i-1] and deenergized_clusters[i+1] and 
-                cluster_mean_voltages[i] < mean_threshold):
-                deenergized_clusters[i] = True
+    def is_stabilizing(self, voltages, labels, timestamps, slope_cutoff=1):
+        """
+        Identify stabilizing segments based on slope.
+        Returns a boolean mask array.
+        """
+        try:
+            from scipy.stats import linregress
+            import numpy as np
+            
+            # Ensure inputs are numpy arrays
+            voltages = np.asarray(voltages)
+            labels = np.asarray(labels)
+            timestamps = np.asarray(timestamps)
+            
+            # Get unique labels
+            unique_labels = np.unique(labels)
+            
+            # Initialize mask - all False initially
+            stabilizing_mask = np.zeros(len(voltages), dtype=bool)
+            
+            # Check each cluster
+            for lab in unique_labels:
+                # Get points in this cluster
+                cluster_mask = (labels == lab)
+                cluster_voltages = voltages[cluster_mask]
+                cluster_timestamps = timestamps[cluster_mask]
+                
+                if len(cluster_voltages) < 2:
+                    # Not enough points for regression, skip
+                    continue
+                else:
+                    # Calculate slope
+                    try:
+                        slope = abs(linregress(cluster_timestamps, cluster_voltages).slope)
+                        
+                        # Check if cluster is stabilizing
+                        if slope > slope_cutoff:
+                            stabilizing_mask[cluster_mask] = True
+                    except:
+                        # If regression fails, skip
+                        continue
+            
+            return stabilizing_mask
+            
+        except Exception as e:
+            print(f"Error in is_stabilizing: {e}")
+            # Return all False if error
+            return np.zeros(len(voltages), dtype=bool)
     
-    deenergized_mask = np.zeros_like(voltages, dtype=bool)
-    for ix, lab in enumerate(unique_labels):
-        if deenergized_clusters[ix]:  # FIX: Only assign True when cluster is deenergized
-            deenergized_mask[labels == lab] = True
+    def is_steadystate(self, voltages, labels, timestamps, slope_threshold=0.1, mean_threshold=20):
+        """
+        Identify steady state segments based on slope and mean voltage.
+        Returns a boolean mask array.
+        """
+        try:
+            from scipy.stats import linregress
+            import numpy as np
+            
+            # Ensure inputs are numpy arrays
+            voltages = np.asarray(voltages)
+            labels = np.asarray(labels)
+            timestamps = np.asarray(timestamps)
+            
+            # Get unique labels
+            unique_labels = np.unique(labels)
+            
+            # Initialize mask - all False initially
+            steadystate_mask = np.zeros(len(voltages), dtype=bool)
+            
+            # Check each cluster
+            for lab in unique_labels:
+                # Get points in this cluster
+                cluster_mask = (labels == lab)
+                cluster_voltages = voltages[cluster_mask]
+                cluster_timestamps = timestamps[cluster_mask]
+                
+                if len(cluster_voltages) < 2:
+                    # Not enough points for regression, use mean only
+                    if np.mean(cluster_voltages) > mean_threshold:
+                        steadystate_mask[cluster_mask] = True
+                else:
+                    # Calculate slope and mean
+                    try:
+                        slope = abs(linregress(cluster_timestamps, cluster_voltages).slope)
+                        mean_voltage = np.mean(cluster_voltages)
+                        
+                        # Check if cluster is steady state
+                        if slope < slope_threshold and mean_voltage > mean_threshold:
+                            steadystate_mask[cluster_mask] = True
+                    except:
+                        # If regression fails, use mean only
+                        if np.mean(cluster_voltages) > mean_threshold:
+                            steadystate_mask[cluster_mask] = True
+            
+            return steadystate_mask
+            
+        except Exception as e:
+            print(f"Error in is_steadystate: {e}")
+            # Return all False if error
+            return np.zeros(len(voltages), dtype=bool)
     
-    return deenergized_mask
-
-def is_steadystate(self, voltages: np.ndarray, labels: np.ndarray, timestamps: np.ndarray,
-                   slope_threshold: float = 0.1, mean_threshold: float = 20) -> np.ndarray:
-    from scipy.stats import linregress
-    
-    unique_labels = np.unique(labels)
-    steadystate_clusters = np.zeros_like(unique_labels, dtype=bool)
-    cluster_mean_voltages = []
-    
-    for ix, lab in enumerate(unique_labels):
-        cluster_mask = labels == lab
-        if np.sum(cluster_mask) > 1:  # Need at least 2 points for regression
-            cluster_mean_voltage = np.mean(voltages[cluster_mask])
-            cluster_abs_slope = np.abs(
-                linregress(timestamps[cluster_mask], voltages[cluster_mask]).slope
+    def apply_status_labels(self, df):
+        """
+        Apply status labels using mask functions.
+        """
+        try:
+            # Debug: Check what we're working with
+            print(f"  Applying labels to dataframe with shape: {df.shape}")
+            print(f"  Columns: {list(df.columns)}")
+            
+            # Get arrays from dataframe
+            voltage_array = df['voltage'].to_numpy()
+            segment_array = df['segment'].to_numpy()
+            timestamp_array = df['timestamp'].to_numpy()
+            
+            print(f"  Arrays created - voltage: {voltage_array.shape}, segment: {segment_array.shape}, timestamp: {timestamp_array.shape}")
+            
+            # Get masks from your functions
+            deenergized_mask = self.is_deenergized(
+                voltage_array,
+                segment_array,
+                timestamp_array
             )
-            if (cluster_abs_slope < slope_threshold and cluster_mean_voltage > mean_threshold):
-                steadystate_clusters[ix] = True
-            cluster_mean_voltages.append(cluster_mean_voltage)
-        else:
-            cluster_mean_voltages.append(np.mean(voltages[cluster_mask]))
+            
+            print(f"  Deenergized mask created: {type(deenergized_mask)}, shape: {deenergized_mask.shape if hasattr(deenergized_mask, 'shape') else 'no shape'}")
+            
+            stabilizing_mask = self.is_stabilizing(
+                voltage_array,
+                segment_array,
+                timestamp_array
+            )
+            
+            print(f"  Stabilizing mask created: {type(stabilizing_mask)}, shape: {stabilizing_mask.shape if hasattr(stabilizing_mask, 'shape') else 'no shape'}")
+            
+            steadystate_mask = self.is_steadystate(
+                voltage_array,
+                segment_array,
+                timestamp_array
+            )
+            
+            print(f"  Steady state mask created: {type(steadystate_mask)}, shape: {steadystate_mask.shape if hasattr(steadystate_mask, 'shape') else 'no shape'}")
+            
+            # Apply labels based on masks
+            df['predicted_status'] = "unidentified"
+            df.loc[deenergized_mask, 'predicted_status'] = "de-energized"
+            df.loc[stabilizing_mask, 'predicted_status'] = "stabilizing"
+            df.loc[steadystate_mask, 'predicted_status'] = "steady_state"
+            
+            print(f"  Labels applied. Value counts: {df['predicted_status'].value_counts().to_dict()}")
+            
+            return df
+            
+        except Exception as e:
+            print(f"ERROR in apply_status_labels: {str(e)}")
+            print(f"Error type: {type(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
     
-    if len(steadystate_clusters) > 2:
-        for i in range(1, len(steadystate_clusters) - 1):
-            if (steadystate_clusters[i-1] and steadystate_clusters[i+1] and  # FIX: Fixed typo here
-                cluster_mean_voltages[i] > mean_threshold):
-                steadystate_clusters[i] = True
-    
-    steadystate_mask = np.zeros_like(voltages, dtype=bool)
-    for ix, lab in enumerate(unique_labels):
-        if steadystate_clusters[ix]:  # FIX: Only assign True when cluster is steady state
-            steadystate_mask[labels == lab] = True
-    
-    return steadystate_mask
-
