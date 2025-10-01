@@ -1,0 +1,34 @@
+def parse_filename(self, filename):
+    """Extract grouping information from filename."""
+    # Remove .csv extension and _segments suffix
+    base = filename.replace('.csv', '').replace('_segments', '')
+    
+    # Parse components by finding = signs
+    parts = {}
+    
+    # Split by underscore first
+    segments = base.split('_')
+    
+    current_key = None
+    current_value_parts = []
+    
+    for segment in segments:
+        if '=' in segment:
+            # If we were building a previous value, save it
+            if current_key and current_value_parts:
+                parts[current_key] = '_'.join(current_value_parts)
+            
+            # Start new key-value pair
+            key, value = segment.split('=', 1)
+            current_key = key
+            current_value_parts = [value] if value else []
+        else:
+            # This segment is part of the current value
+            if current_key:
+                current_value_parts.append(segment)
+    
+    # Don't forget the last key-value pair
+    if current_key and current_value_parts:
+        parts[current_key] = '_'.join(current_value_parts)
+    
+    return parts
