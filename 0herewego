@@ -1,0 +1,268 @@
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+import pandas as pd
+from scipy.stats import zscore
+import seaborn as sns
+# Set style for better-looking plots
+plt.style.use('seaborn-v0_8-darkgrid')
+
+def create_plot_matplotlib(self, df, grouping, output_path):
+    """Create plot showing all labels with different colors using matplotlib."""
+    # Apply status labels if not already present
+    if 'predicted_status' not in df.columns:
+        df = self.apply_status_labels(df)
+    
+    color_map = {
+        'steady_state': 'blue',
+        'stabilizing': 'orange',
+        'de-energized': 'green',
+        'unidentified': 'gray'
+    }
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Plot each label with different color
+    for label in df['predicted_status'].unique():
+        label_data = df[df['predicted_status'] == label]
+        ax.plot(label_data['timestamp'], label_data['voltage'], 
+               color=color_map.get(label, 'gray'), 
+               label=label, alpha=0.7, linewidth=1)
+        ax.scatter(label_data['timestamp'], label_data['voltage'],
+                  color=color_map.get(label, 'gray'),
+                  s=10, alpha=0.5)
+    
+    # Detect and highlight outliers
+    for label in df['predicted_status'].unique():
+        if label == 'unidentified':
+            continue
+            
+        label_data = df[df['predicted_status'] == label]
+        voltage_data = label_data['voltage'].values
+        
+        if len(voltage_data) > 0:
+            # Find outliers
+            z_scores = np.abs(zscore(voltage_data))
+            outlier_mask = z_scores > self.zscore_threshold
+            
+            if np.any(outlier_mask):
+                outlier_data = label_data[outlier_mask]
+                ax.scatter(outlier_data['timestamp'], outlier_data['voltage'],
+                          color='red', s=100, marker='x', 
+                          label=f'{label} outliers', zorder=5)
+    
+    # Add horizontal lines for voltage range
+    ax.axhline(y=self.voltage_min, linestyle='--', color='gray', alpha=0.5)
+    ax.axhline(y=self.voltage_max, linestyle='--', color='gray', alpha=0.5)
+    ax.text(ax.get_xlim()[1], self.voltage_min, f'Min: {self.voltage_min}V', 
+            ha='right', va='bottom', fontsize=9, color='gray')
+    ax.text(ax.get_xlim()[1], self.voltage_max, f'Max: {self.voltage_max}V', 
+            ha='right', va='top', fontsize=9, color='gray')
+    
+    # Set labels and title
+    title = f"Unit: {grouping.get('unit_id', 'N/A')} | " \
+           f"Test: {grouping.get('test_case', 'N/A')} | " \
+           f"Run: {grouping.get('test_run', 'N/A')}"
+    
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('Timestamp', fontsize=12)
+    ax.set_ylabel('Voltage (V)', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    
+    # Add legend
+    ax.legend(loc='best', framealpha=0.9)
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(output_path), dpi=100, bbox_inches='tight')
+    plt.close()
+    
+    return fig
+
+
+def create_threshold_overview_matplotlib(self, summary_df, threshold_df, output_path):
+    """Create comprehensive overview plot showing all test cases and thresholds using matplotlib."""
+    # Get unique test cases and labels
+    test_cases = sorted(summary_df['test_case'].unique()) if 'test_case' in summary_df.columns else ['unknown']
+    labels = ['steady_state', 'stabilizing', 'de-energized']
+    
+    # Metrics to plot
+    metrics_to_plot = ['variance', 'abs_slope', 'cv', 'max_zscore']
+    
+    # Create subplots
+    fig, axes = plt.subplots(len(metrics_to_plot), 1, figsize=(14, 4*len(metrics_to_plot)))
+    if len(metrics_to_plot) == 1:
+        axes = [axes]
+    
+    colors = {
+        'steady_state': 'blue',
+        'stabilizing': 'orange', 
+        'de-energized': 'green'
+    }
+    
+    # For each metric, create grouped box plots
+    for idx, (ax, metric) in enumerate(zip(axes, metrics_to_plot)):
+        data_for_boxplot = []
+        labels_for_boxplot = []
+        positions = []
+        pos = 0
+        
+        for test_case in test_cases:
+            for label in labels:
+                label_data = summary_df[(summary_df['label'] == label) & 
+                                       (summary_df['test_case'] == test_case) if 'test_case' in summary_df.columns 
+                                       else (summary_df['label'] == label)]
+                
+                if metric in label_data.columns and not label_data[metric].dropna().empty:
+                    data_for_boxplot.append(label_data[metric].dropna().values)
+                    labels_for_boxplot.append(f"{test_case[:10]}_{label[:5]}")
+                    positions.append(pos)
+                    
+                    # Add threshold line if exists
+                    if not threshold_df.empty:
+                        thresh_data = threshold_df[
+                            (threshold_df['test_case'] == test_case) & 
+                            (threshold_df['label'] == label) & 
+                            (threshold_df['metric'] == metric)
+                        ]
+                        if not thresh_data.empty:
+                            threshold_val = thresh_data['threshold'].iloc[0]
+                            ax.axhline(y=threshold_val, xmin=(pos-0.4)/len(positions), 
+                                     xmax=(pos+0.4)/len(positions),
+                                     linestyle='--', color=colors[label], alpha=0.7)
+                pos += 1
+        
+        # Create box plot
+        if data_for_boxplot:
+            bp = ax.boxplot(data_for_boxplot, positions=positions, 
+                           widths=0.6, patch_artist=True)
+            
+            # Color the boxes
+            for i, (box, label) in enumerate(zip(bp['boxes'], labels_for_boxplot)):
+                for l in labels:
+                    if l in label:
+                        box.set_facecolor(colors[l])
+                        box.set_alpha(0.5)
+                        break
+            
+            # Add flagged points
+            flagged_data = summary_df[summary_df['flagged'] == True] if 'flagged' in summary_df.columns else pd.DataFrame()
+            if not flagged_data.empty and metric in flagged_data.columns:
+                for i, (pos, label) in enumerate(zip(positions, labels_for_boxplot)):
+                    # Find matching flagged data
+                    for _, row in flagged_data.iterrows():
+                        test_label = f"{row['test_case'][:10] if 'test_case' in row else 'unkn'}_{row['label'][:5]}"
+                        if test_label == label:
+                            ax.scatter(pos, row[metric], color='red', s=100, marker='x', zorder=5)
+        
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels_for_boxplot, rotation=45, ha='right', fontsize=8)
+        ax.set_ylabel(metric.replace('_', ' ').title(), fontsize=10)
+        ax.set_title(f'{metric.replace("_", " ").title()} Analysis', fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    # Main title
+    fig.suptitle(f'Comprehensive Threshold Analysis - {self.dc_folder.name}', 
+                fontsize=16, fontweight='bold')
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save as PNG
+    output_path_png = str(output_path).replace('.html', '.png')
+    plt.savefig(output_path_png, dpi=100, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved threshold overview to: {output_path_png}")
+    return fig
+
+
+def create_distribution_plots_matplotlib(self, summary_df, threshold_df, output_path):
+    """Create distribution plots showing where thresholds fall for each metric using matplotlib."""
+    # Metrics to visualize
+    metrics = ['variance', 'abs_slope', 'cv', 'max_zscore', 'n_outliers_zscore', 'iqr']
+    
+    # Filter to only metrics that exist in the dataframe
+    metrics = [m for m in metrics if m in summary_df.columns]
+    
+    # Calculate grid dimensions
+    n_metrics = len(metrics)
+    n_cols = 3
+    n_rows = (n_metrics + n_cols - 1) // n_cols
+    
+    # Create subplots
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
+    axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
+    
+    colors = {
+        'steady_state': 'blue',
+        'stabilizing': 'orange',
+        'de-energized': 'green'
+    }
+    
+    for i, metric in enumerate(metrics):
+        ax = axes[i]
+        
+        for label in ['steady_state', 'stabilizing', 'de-energized']:
+            label_data = summary_df[summary_df['label'] == label]
+            
+            if metric in label_data.columns:
+                values = label_data[metric].dropna()
+                
+                if len(values) > 0:
+                    # Create histogram
+                    ax.hist(values, bins=30, alpha=0.5, color=colors[label], 
+                           label=label, edgecolor='black', linewidth=0.5)
+                    
+                    # Add threshold lines for each test case
+                    if not threshold_df.empty:
+                        test_cases = summary_df['test_case'].unique() if 'test_case' in summary_df.columns else []
+                        for test_case in test_cases:
+                            thresh_data = threshold_df[
+                                (threshold_df['test_case'] == test_case) & 
+                                (threshold_df['label'] == label) & 
+                                (threshold_df['metric'] == metric)
+                            ]
+                            if not thresh_data.empty:
+                                threshold_val = thresh_data['threshold'].iloc[0]
+                                ax.axvline(x=threshold_val, linestyle='--', 
+                                         color=colors[label], alpha=0.7, linewidth=2)
+                                # Add text label for threshold
+                                ax.text(threshold_val, ax.get_ylim()[1]*0.9, 
+                                       test_case[:5], rotation=90, 
+                                       fontsize=8, color=colors[label])
+        
+        ax.set_xlabel(metric.replace('_', ' ').title(), fontsize=10)
+        ax.set_ylabel('Frequency', fontsize=10)
+        ax.set_title(metric.replace('_', ' ').title(), fontsize=11, fontweight='bold')
+        ax.legend(loc='best', fontsize=8)
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    # Hide empty subplots
+    for i in range(n_metrics, len(axes)):
+        axes[i].set_visible(False)
+    
+    # Main title
+    fig.suptitle(f'Metric Distributions with Dynamic Thresholds - {self.dc_folder.name}', 
+                fontsize=16, fontweight='bold')
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Save as PNG
+    output_path_png = str(output_path).replace('.html', '.png')
+    plt.savefig(output_path_png, dpi=100, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved distribution plots to: {output_path_png}")
+    return fig
+
+
+# Usage: Add these functions to your VoltageSegmentAnalyzer class or call them as:
+# create_plot_matplotlib(self, df, grouping, output_path)
+# create_threshold_overview_matplotlib(self, summary_df, threshold_df, output_path)
+# create_distribution_plots_matplotlib(self, summary_df, threshold_df, output_path)
