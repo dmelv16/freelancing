@@ -144,12 +144,39 @@ class VoltageSegmentAnalyzer:
         # Remove .csv extension and _segments suffix
         base = filename.replace('.csv', '').replace('_segments', '')
         
-        # Parse the components
+        # Parse components more carefully to handle hyphens in values
         parts = {}
-        for part in base.split('_'):
-            if '=' in part:
-                key, value = part.split('=', 1)
-                parts[key] = value
+        
+        # Find all positions where we have 'key=' pattern
+        import re
+        
+        # Find all key= patterns
+        pattern = r'(\w+)='
+        matches = list(re.finditer(pattern, base))
+        
+        if not matches:
+            print(f"Warning: No key=value pairs found in filename: {filename}")
+            return parts
+        
+        # Extract key-value pairs
+        for i, match in enumerate(matches):
+            key = match.group(1)
+            start = match.end()  # Position after the '='
+            
+            # Find where this value ends (at the next key= or end of string)
+            if i + 1 < len(matches):
+                # Value ends at the underscore before the next key
+                next_match = matches[i + 1]
+                # Find the underscore right before the next key
+                end = base.rfind('_', start, next_match.start())
+                if end == -1:  # No underscore found, shouldn't happen
+                    end = next_match.start()
+            else:
+                # This is the last key-value pair
+                end = len(base)
+            
+            value = base[start:end]
+            parts[key] = value
         
         return parts
     
@@ -225,11 +252,28 @@ class VoltageSegmentAnalyzer:
         try:
             filename = csv_path.name
             grouping = self.parse_filename(filename)
+            
+            # Debug: Print what we parsed
+            if not grouping:
+                print(f"Warning: Could not parse filename: {filename}")
+                self.failed_files.append((str(csv_path), "Failed to parse filename"))
+                return [], None, None
+            
             df = pd.read_csv(csv_path)
             
             # Check if required columns exist
-            if 'segment' not in df.columns or 'voltage' not in df.columns or 'timestamp' not in df.columns:
-                raise ValueError(f"Missing required columns in {filename}")
+            required_cols = ['segment', 'voltage', 'timestamp']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                error_msg = f"Missing required columns: {missing_cols}. Found columns: {list(df.columns)}"
+                print(f"Error in {filename}: {error_msg}")
+                self.failed_files.append((str(csv_path), error_msg))
+                return [], None, None
+            
+            # Check if dataframe is empty
+            if df.empty:
+                self.failed_files.append((str(csv_path), "Empty dataframe"))
+                return [], None, None
             
             # Apply status labels using mask functions
             df = self.apply_status_labels(df)
@@ -252,6 +296,7 @@ class VoltageSegmentAnalyzer:
             return results, df, grouping
             
         except Exception as e:
+            print(f"Error processing {csv_path.name}: {str(e)}")
             self.failed_files.append((str(csv_path), str(e)))
             return [], None, None
     
