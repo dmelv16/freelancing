@@ -76,19 +76,66 @@ class VoltageSegmentAnalyzer:
             'de-energized': self._check_de_energized_anomalies
         }
     
-    def segment_to_label(self, segment_value):
+    def is_deenergized(self, voltage, segment, timestamp):
         """
-        PLACEHOLDER: Map segment values (0-7) to labels.
-        Replace this with your actual mapping logic.
+        Your function to identify de-energized segments.
+        Returns a boolean mask array.
         """
-        if segment_value in [0, 1]:
-            return 'steady_state'
-        elif segment_value in [2, 3, 4]:
-            return 'stabilizing'
-        elif segment_value in [5, 6, 7]:
-            return 'de-energized'
-        else:
-            return 'unknown'
+        # PLACEHOLDER: Replace with your actual is_deenergized function
+        # This should be your actual implementation that returns a mask
+        deenergized_mask = voltage < 3  # Simple placeholder
+        return deenergized_mask
+    
+    def is_stabilizing(self, voltage, segment, timestamp):
+        """
+        Your function to identify stabilizing segments.
+        Returns a boolean mask array.
+        """
+        # PLACEHOLDER: Replace with your actual is_stabilizing function
+        # This should be your actual implementation that returns a mask
+        stabilizing_mask = (voltage > 3) & (voltage < 20)  # Simple placeholder
+        return stabilizing_mask
+    
+    def is_steadystate(self, voltage, segment, timestamp):
+        """
+        Your function to identify steady state segments.
+        Returns a boolean mask array.
+        """
+        # PLACEHOLDER: Replace with your actual is_steadystate function
+        # This should be your actual implementation that returns a mask
+        steadystate_mask = voltage >= 20  # Simple placeholder
+        return steadystate_mask
+    
+    def apply_status_labels(self, df):
+        """
+        Apply status labels using mask functions.
+        """
+        # Get masks from your functions
+        deenergized_mask = self.is_deenergized(
+            df['voltage'].to_numpy(),
+            df['segment'].to_numpy(),
+            df['timestamp'].to_numpy()
+        )
+        
+        stabilizing_mask = self.is_stabilizing(
+            df['voltage'].to_numpy(),
+            df['segment'].to_numpy(),
+            df['timestamp'].to_numpy()
+        )
+        
+        steadystate_mask = self.is_steadystate(
+            df['voltage'].to_numpy(),
+            df['segment'].to_numpy(),
+            df['timestamp'].to_numpy()
+        )
+        
+        # Apply labels based on masks
+        df['predicted_status'] = "unidentified"
+        df.loc[deenergized_mask, 'predicted_status'] = "de-energized"
+        df.loc[stabilizing_mask, 'predicted_status'] = "stabilizing"
+        df.loc[steadystate_mask, 'predicted_status'] = "steady_state"
+        
+        return df
     
     def parse_filename(self, filename):
         """Extract grouping information from filename."""
@@ -179,17 +226,18 @@ class VoltageSegmentAnalyzer:
             df = pd.read_csv(csv_path)
             
             # Check if required columns exist
-            if 'segment' not in df.columns or 'voltage' not in df.columns:
+            if 'segment' not in df.columns or 'voltage' not in df.columns or 'timestamp' not in df.columns:
                 raise ValueError(f"Missing required columns in {filename}")
             
-            df['label'] = df['segment'].apply(self.segment_to_label)
+            # Apply status labels using mask functions
+            df = self.apply_status_labels(df)
             
             results = []
-            for label in df['label'].unique():
-                if label == 'unknown':
+            for label in df['predicted_status'].unique():
+                if label == 'unidentified':
                     continue
                 
-                label_data = df[df['label'] == label]
+                label_data = df[df['predicted_status'] == label]
                 voltage_data = label_data['voltage'].values
                 
                 if len(voltage_data) == 0:
@@ -421,20 +469,22 @@ class VoltageSegmentAnalyzer:
     
     def create_plot(self, df, grouping, output_path):
         """Create plot showing all labels with different colors."""
-        df['label'] = df['segment'].apply(self.segment_to_label)
+        # Apply status labels if not already present
+        if 'predicted_status' not in df.columns:
+            df = self.apply_status_labels(df)
         
         color_map = {
             'steady_state': 'blue',
             'stabilizing': 'orange',
             'de-energized': 'green',
-            'unknown': 'gray'
+            'unidentified': 'gray'
         }
         
         fig = go.Figure()
         
         # Plot each label with different color
-        for label in df['label'].unique():
-            label_data = df[df['label'] == label]
+        for label in df['predicted_status'].unique():
+            label_data = df[df['predicted_status'] == label]
             
             fig.add_trace(go.Scatter(
                 x=label_data['timestamp'],
@@ -446,28 +496,29 @@ class VoltageSegmentAnalyzer:
             ))
         
         # Detect and highlight outliers
-        for label in df['label'].unique():
-            if label == 'unknown':
+        for label in df['predicted_status'].unique():
+            if label == 'unidentified':
                 continue
                 
-            label_data = df[df['label'] == label]
+            label_data = df[df['predicted_status'] == label]
             voltage_data = label_data['voltage'].values
             
-            # Find outliers
-            z_scores = np.abs(zscore(voltage_data))
-            outlier_mask = z_scores > self.zscore_threshold
-            
-            if np.any(outlier_mask):
-                outlier_data = label_data[outlier_mask]
+            if len(voltage_data) > 0:
+                # Find outliers
+                z_scores = np.abs(zscore(voltage_data))
+                outlier_mask = z_scores > self.zscore_threshold
                 
-                fig.add_trace(go.Scatter(
-                    x=outlier_data['timestamp'],
-                    y=outlier_data['voltage'],
-                    mode='markers',
-                    name=f'{label} outliers',
-                    marker=dict(color='red', size=10, symbol='x'),
-                    showlegend=True
-                ))
+                if np.any(outlier_mask):
+                    outlier_data = label_data[outlier_mask]
+                    
+                    fig.add_trace(go.Scatter(
+                        x=outlier_data['timestamp'],
+                        y=outlier_data['voltage'],
+                        mode='markers',
+                        name=f'{label} outliers',
+                        marker=dict(color='red', size=10, symbol='x'),
+                        showlegend=True
+                    ))
         
         # Add horizontal lines for voltage range
         fig.add_hline(y=self.voltage_min, line_dash="dash", line_color="gray", 
